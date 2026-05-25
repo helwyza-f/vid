@@ -45,3 +45,4 @@ supabase-setup.sql
 
 BACKEND_SPEC.md
 BACKEND_TESTING.md
+.render-cache/

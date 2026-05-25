@@ -3,7 +3,7 @@
 import { Icon } from "@iconify/react";
 import { ExportDropdown } from "../ExportDropdown";
 import { ExportImageDropdown } from "../ExportImageDropdown";
-import type { ExportQuality, ExportProgress } from "@/types";
+import type { ExportQuality, ExportProgress, ExportRenderMode } from "@/types";
 import type { EditorMode } from "@/types/editor-mode.types";
 import type { ImageExportFormat } from "@/types/image-project.types";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -23,9 +23,12 @@ interface ImageExportProgress {
 }
 
 interface EditorTopBarProps {
-    onExport: (quality: ExportQuality) => void;
+    onExport: (quality: ExportQuality, renderMode?: ExportRenderMode) => void;
+    onLegacyExport?: (quality: ExportQuality) => void;
     exportProgress: ExportProgress;
     hasTransparentBackground?: boolean;
+    actualCaptureFps?: number | null;
+    targetExportFps?: number | null;
     onUndo?: () => void;
     onRedo?: () => void;
     canUndo?: boolean;
@@ -45,10 +48,21 @@ interface EditorTopBarProps {
     onRenameProject?: (title: string) => Promise<void> | void;
 }
 
+function formatFps(value: number | null | undefined) {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+        return "n/a";
+    }
+
+    return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
 export function EditorTopBar({
     onExport,
+    onLegacyExport,
     exportProgress,
     hasTransparentBackground,
+    actualCaptureFps,
+    targetExportFps,
     onUndo,
     onRedo,
     canUndo = false,
@@ -258,6 +272,17 @@ export function EditorTopBar({
                     </TooltipAction>
                 </div>
 
+                <div className="hidden xl:flex items-center gap-2 px-3 border-r border-white/10">
+                    <div className="rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1">
+                        <div className="text-[9px] uppercase tracking-[0.18em] text-white/30">Capture</div>
+                        <div className="text-xs font-semibold text-white/80">{formatFps(actualCaptureFps)}fps</div>
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1">
+                        <div className="text-[9px] uppercase tracking-[0.18em] text-white/30">Export</div>
+                        <div className="text-xs font-semibold text-white/80">{formatFps(targetExportFps)}fps</div>
+                    </div>
+                </div>
+
                 {isPhotoMode && onImageExport && imageExportProgress ? (
                     <ExportImageDropdown
                         onExport={onImageExport}
@@ -269,6 +294,7 @@ export function EditorTopBar({
                 ) : (
                     <ExportDropdown
                         onExport={onExport}
+                        onLegacyExport={onLegacyExport}
                         exportProgress={exportProgress}
                         hasTransparentBackground={hasTransparentBackground}
                     />

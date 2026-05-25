@@ -154,9 +154,9 @@ export async function requestCameraStream(
     return navigator.mediaDevices.getUserMedia({
         video: {
             deviceId: deviceId ? { exact: deviceId } : undefined,
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            frameRate: { ideal: 30 },
+            width: { ideal: 1920, max: 1920 },
+            height: { ideal: 1080, max: 1080 },
+            frameRate: { ideal: 60, max: 60 },
         },
         audio: false,
     });

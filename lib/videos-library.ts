@@ -118,6 +118,7 @@ async function getVideoMetadata(file: File): Promise<{
     width: number;
     height: number;
     aspectRatio: string;
+    fps?: number;
 }> {
     return new Promise((resolve, reject) => {
         const video = document.createElement("video");
@@ -129,6 +130,7 @@ async function getVideoMetadata(file: File): Promise<{
                 width: video.videoWidth,
                 height: video.videoHeight,
                 aspectRatio: "auto",
+                fps: undefined,
             };
             URL.revokeObjectURL(video.src);
             resolve(metadata);
@@ -220,6 +222,7 @@ export async function addVideoToLibrary(
         aspectRatio: metadata.aspectRatio,
         uploadedAt: Date.now(),
         thumbnailUrl,
+        fps: metadata.fps,
         hasAudio,
         originalHasAudio: hasAudio,
     };
@@ -240,6 +243,7 @@ export interface AddVideoWithMetadataOptions {
     duration: number;
     width: number;
     height: number;
+    fps?: number;
     hasAudio?: boolean;
     projectId?: string | null;
     cloudAssetId?: string | null;
@@ -280,6 +284,7 @@ export async function addVideoToLibraryWithMetadata(options: AddVideoWithMetadat
         aspectRatio: "auto",
         uploadedAt: Date.now(),
         thumbnailUrl,
+        fps: options.fps,
         hasAudio: hasAudio,
         originalHasAudio: hasAudio,
     };

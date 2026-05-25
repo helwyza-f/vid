@@ -14,9 +14,25 @@ interface ExportOverlayProps {
     exportProgress: ExportProgress;
     onCancel: () => void;
     isTransparentExport?: boolean;
+    actualCaptureFps?: number | null;
+    targetExportFps?: number | null;
 }
 
-export function ExportOverlay({ exportProgress, onCancel, isTransparentExport }: ExportOverlayProps) {
+function formatFps(value: number | null | undefined) {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+        return "n/a";
+    }
+
+    return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+export function ExportOverlay({
+    exportProgress,
+    onCancel,
+    isTransparentExport,
+    actualCaptureFps,
+    targetExportFps,
+}: ExportOverlayProps) {
     const t = useTranslations("exportOverlay");
 
     const isExporting = exportProgress.status !== "idle" &&
@@ -79,6 +95,17 @@ export function ExportOverlay({ exportProgress, onCancel, isTransparentExport }:
                         <p className="text-sm text-white/40 font-mono italic mt-0.5 tracking-wide">
                             {exportProgress.message.replace(/^\[Paso \d\/\d\] /, "")}
                         </p>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                        <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3">
+                            <div className="text-[10px] uppercase tracking-[0.2em] text-white/35">Actual capture</div>
+                            <div className="mt-1 text-lg font-semibold text-white">{formatFps(actualCaptureFps)}<span className="ml-1 text-xs font-medium text-white/45">fps</span></div>
+                        </div>
+                        <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3">
+                            <div className="text-[10px] uppercase tracking-[0.2em] text-white/35">Target export</div>
+                            <div className="mt-1 text-lg font-semibold text-white">{formatFps(targetExportFps)}<span className="ml-1 text-xs font-medium text-white/45">fps</span></div>
+                        </div>
                     </div>
 
                     <div className="flex items-start gap-3 p-4 bg-white/5 border border-white/10 rounded-xl">

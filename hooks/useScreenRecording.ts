@@ -83,6 +83,7 @@ async function saveVideoToIndexedDB(
   extras: {
     cameraBlob?: Blob | null;
     cameraConfig?: CameraConfig | null;
+    captureFrameRate?: number | null;
   } = {}
 ): Promise<string> {
   try {
@@ -107,6 +108,7 @@ async function saveVideoToIndexedDB(
       isRecordedVideo: true,
       cameraBlob: extras.cameraBlob ?? null,
       cameraConfig: extras.cameraConfig ?? null,
+      captureFrameRate: extras.captureFrameRate ?? null,
     };
 
     const putRequest = store.put(videoData, "currentVideo");
@@ -133,6 +135,7 @@ export async function loadVideoFromIndexedDB(): Promise<{
   cameraBlob?: Blob | null;
   cameraUrl?: string | null;
   cameraConfig?: CameraConfig | null;
+  captureFrameRate?: number | null;
 } | null> {
   try {
     const db = await getDB();
@@ -168,6 +171,7 @@ export async function loadVideoFromIndexedDB(): Promise<{
             cameraBlob,
             cameraUrl,
             cameraConfig: data.cameraConfig ?? null,
+            captureFrameRate: data.captureFrameRate ?? null,
           });
         } else {
           resolve(null);
@@ -347,7 +351,11 @@ export function useScreenRecording() {
   }, []);
 
   const startRecording = useCallback(
-    (screenStream: MediaStream, camStream: MediaStream | null) => {
+    (
+      screenStream: MediaStream,
+      camStream: MediaStream | null,
+      actualCaptureFrameRate: number | null
+    ) => {
       try {
         screenChunksRef.current = [];
         cameraChunksRef.current = [];
@@ -364,7 +372,14 @@ export function useScreenRecording() {
 
         const screenRecorder = new MediaRecorder(
           screenStream,
-          screenMime ? { mimeType: screenMime } : undefined
+          screenMime
+            ? {
+                mimeType: screenMime,
+                videoBitsPerSecond: 18_000_000,
+              }
+            : {
+                videoBitsPerSecond: 18_000_000,
+              }
         );
         screenRecorderRef.current = screenRecorder;
 
@@ -392,7 +407,14 @@ export function useScreenRecording() {
 
           cameraRecorder = new MediaRecorder(
             camStream,
-            camMime ? { mimeType: camMime } : undefined
+            camMime
+              ? {
+                  mimeType: camMime,
+                  videoBitsPerSecond: 10_000_000,
+                }
+              : {
+                  videoBitsPerSecond: 10_000_000,
+                }
           );
           cameraRecorderRef.current = cameraRecorder;
 
@@ -419,7 +441,11 @@ export function useScreenRecording() {
             await saveVideoToIndexedDB(
               screenBlob || new Blob([], { type: "video/webm" }),
               duration,
-              { cameraBlob, cameraConfig: cameraConfigRef.current }
+              {
+                cameraBlob,
+                cameraConfig: cameraConfigRef.current,
+                captureFrameRate: actualCaptureFrameRate,
+              }
             );
 
             const isEditorRoute =
@@ -495,12 +521,22 @@ export function useScreenRecording() {
         setRecordingTime(0);
 
         const screenStream = await navigator.mediaDevices.getDisplayMedia({
-          video: { displaySurface: "browser" },
+          video: {
+            displaySurface: "browser",
+            width: { ideal: 1920, max: 3840 },
+            height: { ideal: 1080, max: 2160 },
+            frameRate: { ideal: 60, max: 60 },
+          },
           audio: setup.systemAudio
             ? { echoCancellation: true, noiseSuppression: true }
             : false,
         });
         screenStreamRef.current = screenStream;
+        const captureFrameRateSetting = screenStream.getVideoTracks()[0]?.getSettings()?.frameRate;
+        const actualCaptureFrameRate =
+          typeof captureFrameRateSetting === "number" && Number.isFinite(captureFrameRateSetting)
+            ? Number(captureFrameRateSetting.toFixed(2))
+            : null;
 
         let camStream: MediaStream | null = null;
         if (setup.camera.enabled) {
@@ -595,7 +631,7 @@ export function useScreenRecording() {
           setCountdown(count);
           if (count <= 0) {
             clearInterval(countdownInterval);
-            startRecording(finalScreenStream, camStream);
+            startRecording(finalScreenStream, camStream, actualCaptureFrameRate);
           }
         }, 1000);
       } catch (err) {

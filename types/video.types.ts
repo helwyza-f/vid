@@ -2,6 +2,7 @@ import { CropArea } from "./editor.types";
 import type { VideoTrackClip } from "./video-track.types";
 
 export type ExportQuality = "4k" | "2k" | "1080p" | "720p" | "480p" | "gif" | "webm-alpha";
+export type ExportRenderMode = "fast" | "high";
 
 export interface TrimSettings {
     start: number;
@@ -10,6 +11,7 @@ export interface TrimSettings {
 
 export interface ExportSettings {
     quality: ExportQuality;
+    renderMode?: ExportRenderMode;
     fps?: number;
     trim?: TrimSettings;
     transparentBackground?: boolean;
@@ -85,6 +87,7 @@ export interface LibraryVideo {
     aspectRatio: string;
     uploadedAt: number;
     thumbnailUrl?: string;
+    fps?: number;
     hasAudio?: boolean;
     originalHasAudio?: boolean;
 }
@@ -102,6 +105,7 @@ export interface LibraryVideoInfo {
     aspectRatio: string;
     uploadedAt: number;
     thumbnailUrl?: string;
+    fps?: number;
     hasAudio?: boolean;
     originalHasAudio?: boolean;
 }

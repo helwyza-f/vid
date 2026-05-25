@@ -17,9 +17,11 @@ import { useUndoRedo } from "@/hooks/useUndoRedo";
 import { clearAllThumbnailCache } from "@/lib/thumbnail-cache";
 import { addVideoToLibrary, addVideoToLibraryWithMetadata, getLibraryVideoCount, getLibraryVideo, findExistingVideo, findExistingCloudVideo, updateLibraryVideoCloudLink } from "@/lib/videos-library";
 import { createProject as createCloudProject, createProjectAsset, downloadProjectAsset, getProject, listProjectAssets, listProjects, updateProject } from "@/lib/cloud-projects";
+import { createRenderJobSubmission } from "@/lib/render/manifest";
+import { createRenderAssetOverride, shouldPromoteClientUrl, uploadRenderAsset } from "@/lib/render/client-assets";
 import type { CloudProject } from "@/types/cloud-project.types";
 import { calculateTotalDuration, findNextClipPosition, getClipAtTime, type VideoTrackClip } from "@/types/video-track.types";
-import type { ExportQuality, Tool, BackgroundTab, VideoCanvasHandle, BackgroundColorConfig, AspectRatio, CropArea, ZoomFragment, AudioTrack, ImageExportFormat } from "@/types";
+import type { ExportQuality, ExportProgress, ExportRenderMode, Tool, BackgroundTab, VideoCanvasHandle, BackgroundColorConfig, AspectRatio, CropArea, ZoomFragment, AudioTrack, ImageExportFormat, LibraryVideoInfo, UploadedAudio } from "@/types";
 import type { TrimRange } from "@/types/timeline.types";
 import type { MockupConfig } from "@/types/mockup.types";
 import type { EditorState } from "@/types/editor-state.types";
@@ -28,6 +30,7 @@ import { DEFAULT_MOCKUP_CONFIG, getMockupDefaultConfig } from "@/types/mockup.ty
 import type { CanvasElement } from "@/types/canvas-elements.types";
 import type { CameraConfig } from "@/types/camera.types";
 import type { Preview3DConfig, ImageMaskConfig } from "@/types/photo.types";
+import type { RenderJobGeneratedArtifact, RenderJobRecord } from "@/types/render.types";
 import { DEFAULT_MASK_CONFIG, PREVIEW_CONFIGS } from "@/types/photo.types";
 import { MOCKUPS } from "@/lib/mockup-data";
 import { gradientToCss, generateDefaultZoomFragments, createZoomFragment, ASPECT_RATIO_DIMENSIONS } from "@/types";
@@ -41,7 +44,7 @@ import { findValidFragmentPosition } from "@/app/components/ui/editor/ZoomFragme
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 import { TimelineSkeleton } from "@/app/components/ui/Skeleton";
 import { AudioTrimModal } from "@/app/components/ui/editor/AudioTrimModal";
-import { VIDEO_Z_INDEX } from "@/lib/constants";
+import { QUALITY_SETTINGS, VIDEO_Z_INDEX } from "@/lib/constants";
 import Image from "next/image";
 import Link from "next/link";
 import { TooltipAction } from "@/components/ui/tooltip-action";
@@ -55,6 +58,7 @@ const ImageCropperModal = lazy(() => import("@/app/components/ui/editor/ImageCro
 const PhotoEditorPlaceholder = lazy(() => import("@/app/components/ui/editor/PhotoEditorPlaceholder").then(mod => ({ default: mod.PhotoEditorPlaceholder })));
 
 const PLAYBACK_UI_UPDATE_INTERVAL_MS = 80;
+const NATIVE_SUPPORTED_MOCKUPS = new Set(["macos"]);
 
 export default function Editor() {
     // Editor mode (video/photo) from URL params
@@ -69,6 +73,7 @@ export default function Editor() {
     const [cloudProjectError, setCloudProjectError] = useState<string | null>(null);
     const restoringCloudProjectRef = useRef(false);
     const savingCloudProjectRef = useRef<NodeJS.Timeout | null>(null);
+    const latestRenderJobIdRef = useRef<string | null>(null);
 
     // Undo/Redo system - centralized state management
     const {
@@ -250,13 +255,17 @@ export default function Editor() {
     const [selectedElementId, setSelectedElementId] = useState<string | null>(null);
 
     // Audio state
-    const [uploadedAudios, setUploadedAudios] = useState<import("@/types/audio.types").UploadedAudio[]>([]);
-    const [audioTracks, setAudioTracks] = useState<import("@/types/audio.types").AudioTrack[]>([]);
+    const [uploadedAudios, setUploadedAudios] = useState<UploadedAudio[]>([]);
+    const [audioTracks, setAudioTracks] = useState<AudioTrack[]>([]);
     const [muteOriginalAudio, setMuteOriginalAudio] = useState<boolean>(false);
     const [masterVolume, setMasterVolume] = useState<number>(1);
     const [selectedAudioTrackId, setSelectedAudioTrackId] = useState<string | null>(null);
     // Whether the currently loaded source video file contains an audio stream
     const [videoHasAudioTrack, setVideoHasAudioTrack] = useState<boolean>(true);
+    const [actualCaptureFps, setActualCaptureFps] = useState<number | null>(null);
+    const [targetExportFps, setTargetExportFps] = useState<number | null>(QUALITY_SETTINGS["1080p"].fps ?? null);
+    const [newVideosCount, setNewVideosCount] = useState<number>(0);
+    const [videosLibraryRefresh, setVideosLibraryRefresh] = useState<number>(0);
 
     const [isRecordedVideo, setIsRecordedVideo] = useState<boolean>(false);
 
@@ -271,6 +280,34 @@ export default function Editor() {
     const handleCameraClick = useCallback(() => {
         setActiveTool("camera");
     }, []);
+
+    useEffect(() => {
+        let cancelled = false;
+
+        const syncCurrentVideoFps = async () => {
+            if (!videoId) {
+                setActualCaptureFps(null);
+                return;
+            }
+
+            try {
+                const libraryVideo = await getLibraryVideo(videoId);
+                if (!cancelled) {
+                    setActualCaptureFps(libraryVideo?.fps ?? null);
+                }
+            } catch {
+                if (!cancelled) {
+                    setActualCaptureFps(null);
+                }
+            }
+        };
+
+        void syncCurrentVideoFps();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [videoId, videosLibraryRefresh]);
 
     // Auto-save current image project when configurations change
     const autoSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -800,10 +837,6 @@ export default function Editor() {
         setImageMaskConfig(DEFAULT_MASK_CONFIG);
         setVideoTransform({ rotation: 0, translateX: 0, translateY: 0 });
     }, []);
-
-    // Videos library state
-    const [newVideosCount, setNewVideosCount] = useState<number>(0);
-    const [videosLibraryRefresh, setVideosLibraryRefresh] = useState<number>(0);
 
     // Video track clips state (multi-video support)
     const [videoClips, setVideoClips] = useState<VideoTrackClip[]>([]);
@@ -1380,41 +1413,533 @@ export default function Editor() {
         }
     }, [videoClips]);
 
+    const editorStateSnapshot = useMemo<EditorState>(() => createInitialEditorState({
+        backgroundTab,
+        selectedWallpaper,
+        backgroundBlur,
+        padding,
+        roundedCorners,
+        shadows,
+        selectedImageUrl,
+        backgroundColorConfig,
+        aspectRatio,
+        customDimensions,
+        cropArea,
+        trimRange,
+        zoomFragments,
+        mockupId,
+        mockupConfig,
+        canvasElements,
+        audioTracks,
+        muteOriginalAudio,
+        masterVolume,
+        cameraConfig,
+        videoTransform,
+        imageTransform,
+        apply3DToBackground,
+        imageMaskConfig,
+        videoMaskConfig,
+        videoClips,
+    }), [
+        backgroundTab,
+        selectedWallpaper,
+        backgroundBlur,
+        padding,
+        roundedCorners,
+        shadows,
+        selectedImageUrl,
+        backgroundColorConfig,
+        aspectRatio,
+        customDimensions,
+        cropArea,
+        trimRange,
+        zoomFragments,
+        mockupId,
+        mockupConfig,
+        canvasElements,
+        audioTracks,
+        muteOriginalAudio,
+        masterVolume,
+        cameraConfig,
+        videoTransform,
+        imageTransform,
+        apply3DToBackground,
+        imageMaskConfig,
+        videoMaskConfig,
+        videoClips,
+    ]);
+
     const { exportVideo, cancelExport, exportProgress } = useVideoExport(videoRef, canvasRef);
     const { uploadVideo, loadUploadedVideo, isUploading } = useVideoUpload();
     const [videoBlob, setVideoBlob] = useState<Blob | null>(null);
+    const [nativeExportProgress, setNativeExportProgress] = useState<ExportProgress>({
+        status: "idle",
+        progress: 0,
+        message: "",
+    });
+    const [isNativeExporting, setIsNativeExporting] = useState(false);
+    const nativeExportCancelRef = useRef(false);
 
-    const handleExport = (quality: ExportQuality) => {
+    const buildExportSettings = useCallback((quality: ExportQuality, renderMode: ExportRenderMode = "fast") => ({
+        quality,
+        renderMode,
+        videoBlob: videoBlob ?? undefined,
+        transparentBackground: selectedWallpaper === -1,
+        trim: trimRange.end > trimRange.start ? { start: trimRange.start, end: trimRange.end } : undefined,
+        muteOriginalAudio,
+        videoHasAudioTrack,
+        audioTracks: audioTracks.map(track => {
+            const audio = uploadedAudios.find(a => a.id === track.audioId);
+            return {
+                audioUrl: audio?.url || '',
+                startTime: track.startTime,
+                duration: track.duration,
+                trimStart: track.trimStart ?? 0,
+                volume: track.volume,
+                loop: track.loop,
+            };
+        }),
+        masterVolume,
+        videoClips: videoClips.length > 0 ? videoClips : undefined,
+        videoClipBlobs: videoClips.length > 1 ? videoBlobsRef.current : undefined,
+        clipAudioStates: Object.fromEntries(clipAudioStateRef.current),
+    }), [
+        audioTracks,
+        masterVolume,
+        muteOriginalAudio,
+        selectedWallpaper,
+        trimRange,
+        uploadedAudios,
+        videoBlob,
+        videoClips,
+        videoHasAudioTrack,
+    ]);
+
+    const submitRenderJobDraft = useCallback(async (
+        quality: ExportQuality,
+        renderMode: ExportRenderMode = "fast",
+    ) => {
+        const uniqueLibraryVideoIds = new Set<string>();
+        if (videoId) {
+            uniqueLibraryVideoIds.add(videoId);
+        }
+        for (const clip of videoClips) {
+            uniqueLibraryVideoIds.add(clip.libraryVideoId);
+        }
+
+        const libraryVideos = (await Promise.all(
+            [...uniqueLibraryVideoIds].map(async (libraryVideoId) => getLibraryVideo(libraryVideoId))
+        )).filter((asset): asset is NonNullable<typeof asset> => asset !== null);
+
+        const videoAssets: LibraryVideoInfo[] = libraryVideos.map(({ blob: _blob, ...info }) => info);
+        const currentVideoAsset = videoId
+            ? videoAssets.find((asset) => asset.id === videoId) ?? null
+            : null;
+        const assetOverrides: Record<string, ReturnType<typeof createRenderAssetOverride>> = {};
+
+        await Promise.all(
+            libraryVideos.map(async (asset) => {
+                const uploaded = await uploadRenderAsset({
+                    manifestAssetId: `video:${asset.id}`,
+                    kind: "video",
+                    file: asset.blob,
+                    fileName: asset.fileName,
+                    mimeType: asset.blob.type || "video/mp4",
+                    metadata: {
+                        width: asset.width,
+                        height: asset.height,
+                        duration: asset.duration,
+                        hasAudio: asset.hasAudio,
+                        originalHasAudio: asset.originalHasAudio,
+                    },
+                });
+                assetOverrides[`video:${asset.id}`] = createRenderAssetOverride(uploaded);
+            })
+        );
+
+        await Promise.all(
+            uploadedAudios
+                .filter((audio) => shouldPromoteClientUrl(audio.url))
+                .map(async (audio) => {
+                    const blob = await fetch(audio.url).then((response) => response.blob());
+                    const uploaded = await uploadRenderAsset({
+                        manifestAssetId: `audio:${audio.id}`,
+                        kind: "audio",
+                        file: blob,
+                        fileName: audio.name,
+                        mimeType: audio.mimeType || blob.type || "audio/mpeg",
+                        metadata: {
+                            duration: audio.duration,
+                        },
+                    });
+                    assetOverrides[`audio:${audio.id}`] = createRenderAssetOverride(uploaded);
+                })
+        );
+
+        if (shouldPromoteClientUrl(selectedImageUrl)) {
+            const blob = await fetch(selectedImageUrl).then((response) => response.blob());
+            const uploaded = await uploadRenderAsset({
+                manifestAssetId: "image:background",
+                kind: "image",
+                file: blob,
+                fileName: "background-image",
+                mimeType: blob.type || "image/png",
+                metadata: {
+                    width: videoDimensions?.width,
+                    height: videoDimensions?.height,
+                },
+            });
+            assetOverrides["image:background"] = createRenderAssetOverride(uploaded);
+        }
+
+        await Promise.all(
+            canvasElements
+                .filter((element): element is Extract<CanvasElement, { type: "image" }> => (
+                    element.type === "image" && shouldPromoteClientUrl(element.imagePath)
+                ))
+                .map(async (element) => {
+                    const blob = await fetch(element.imagePath).then((response) => response.blob());
+                    const uploaded = await uploadRenderAsset({
+                        manifestAssetId: `image:canvas:${element.id}`,
+                        kind: "image",
+                        file: blob,
+                        fileName: `${element.category || "canvas-image"}-${element.id}`,
+                        mimeType: blob.type || "image/png",
+                        metadata: {
+                            width: element.width,
+                            height: element.height,
+                        },
+                    });
+                    assetOverrides[`image:canvas:${element.id}`] = createRenderAssetOverride(uploaded);
+                })
+        );
+
+        if (shouldPromoteClientUrl(cameraUrl)) {
+            const cameraAssetUrl = cameraUrl as string;
+            const blob = await fetch(cameraAssetUrl).then((response) => response.blob());
+            const uploaded = await uploadRenderAsset({
+                manifestAssetId: "camera:overlay",
+                kind: "camera-video",
+                file: blob,
+                fileName: "camera-overlay.webm",
+                mimeType: blob.type || "video/webm",
+            });
+            assetOverrides["camera:overlay"] = createRenderAssetOverride(uploaded);
+        }
+
+        const exportSettings = buildExportSettings(quality, renderMode);
+
+        const submission = createRenderJobSubmission({
+            projectId: activeProjectId,
+            projectTitle: cloudProjectTitle,
+            editorState: editorStateSnapshot,
+            exportSettings,
+            videoDuration,
+            videoDimensions,
+            videoAssets,
+            currentVideoAsset,
+            uploadedAudios,
+            videoHasAudioTrack,
+            cameraUrl,
+            assetOverrides,
+        });
+
+        const response = await fetch("/api/render/jobs", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify(submission),
+        });
+
+        if (!response.ok) {
+            throw new Error(`Failed to create render job draft: ${response.status}`);
+        }
+
+        const data = await response.json() as { job?: { jobId?: string } };
+        const jobId = data.job?.jobId ?? null;
+        latestRenderJobIdRef.current = jobId;
+        return jobId;
+    }, [
+        activeProjectId,
+        audioTracks,
+        buildExportSettings,
+        canvasElements,
+        cameraUrl,
+        cloudProjectTitle,
+        editorStateSnapshot,
+        masterVolume,
+        muteOriginalAudio,
+        selectedImageUrl,
+        selectedWallpaper,
+        trimRange,
+        uploadedAudios,
+        videoBlob,
+        videoClips,
+        videoDimensions,
+        videoDuration,
+        videoHasAudioTrack,
+        videoId,
+    ]);
+
+    const resolvePrimaryOutputArtifact = useCallback((job: RenderJobRecord | null | undefined) => {
+        if (!job?.worker?.generatedArtifacts?.length) {
+            return null;
+        }
+
+        const outputArtifacts = job.worker.generatedArtifacts.filter(
+            (artifact) => artifact.kind === "output"
+        );
+        if (outputArtifacts.length > 0) {
+            return outputArtifacts[outputArtifacts.length - 1] ?? null;
+        }
+
+        return job.worker.generatedArtifacts[job.worker.generatedArtifacts.length - 1] ?? null;
+    }, []);
+
+    const mapRenderJobToExportProgress = useCallback((job: RenderJobRecord): ExportProgress => {
+        if (job.status === "completed") {
+            return {
+                status: "complete",
+                progress: 100,
+                message: job.worker?.summary || "Native render complete",
+            };
+        }
+
+        if (job.status === "failed" || job.status === "cancelled") {
+            return {
+                status: "error",
+                progress: job.worker?.progress ?? 0,
+                message: job.worker?.errorMessage || job.issues.find(issue => issue.severity === "error")?.message || "Native render failed",
+            };
+        }
+
+        const progress = Math.max(2, Math.min(99, job.worker?.progress ?? (job.status === "queued" ? 8 : 15)));
+        const stage = job.worker?.stage || (
+            job.status === "queued"
+                ? "Queued for native worker"
+                : job.status === "processing"
+                    ? "Native worker processing"
+                    : "Preparing native render"
+        );
+
+        const status: ExportProgress["status"] = progress < 15
+            ? "preparing"
+            : progress < 90
+                ? "encoding"
+                : "finalizing";
+
+        return {
+            status,
+            progress,
+            message: stage,
+        };
+    }, []);
+
+    const getLegacyExportFallbackReasons = useCallback(() => {
+        const reasons: string[] = [];
+        const nonDefaultImageTransform =
+            imageTransform.rotateX !== 0 ||
+            imageTransform.rotateY !== 0 ||
+            imageTransform.rotateZ !== 0 ||
+            imageTransform.translateY !== 0 ||
+            imageTransform.scale !== 0.9 ||
+            imageTransform.perspective !== 600;
+
+        if (mockupId !== "none" && !NATIVE_SUPPORTED_MOCKUPS.has(mockupId)) {
+            reasons.push("mockup frame");
+        }
+        if (imageMaskConfig.enabled) {
+            reasons.push("mask effects");
+        }
+        if (apply3DToBackground || nonDefaultImageTransform) {
+            reasons.push("3D transforms");
+        }
+        if (zoomFragments.some((fragment) => fragment.enable3D)) {
+            reasons.push("3D zoom");
+        }
+        if (canvasElements.some((element) => element.type === "svg")) {
+            reasons.push("SVG elements");
+        }
+        if (canvasElements.some((element) => element.type === "text")) {
+            reasons.push("text overlays");
+        }
+        return reasons;
+    }, [
+        apply3DToBackground,
+        canvasElements,
+        imageMaskConfig.enabled,
+        imageTransform,
+        mockupId,
+        zoomFragments,
+    ]);
+
+    const downloadRenderArtifact = useCallback(async (
+        jobId: string,
+        artifact: RenderJobGeneratedArtifact
+    ) => {
+        const fileName = artifact.relativePath.split("/").pop() || `${jobId}.mp4`;
+        const downloadUrl = `/api/render/jobs/${jobId}/artifacts/${encodeURIComponent(artifact.id)}`;
+        const anchor = document.createElement("a");
+        anchor.href = downloadUrl;
+        anchor.download = fileName;
+        anchor.rel = "noopener";
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+    }, []);
+
+    const waitForRenderJob = useCallback(async (jobId: string) => {
+        const startedAt = Date.now();
+
+        while (!nativeExportCancelRef.current) {
+            const response = await fetch(`/api/render/jobs/${jobId}`, {
+                cache: "no-store",
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to fetch render job status: ${response.status}`);
+            }
+
+            const data = await response.json() as { job?: RenderJobRecord };
+            const job = data.job;
+            if (!job) {
+                throw new Error("Render job status payload missing");
+            }
+
+            setNativeExportProgress(mapRenderJobToExportProgress(job));
+
+            if (job.status === "completed") {
+                return job;
+            }
+
+            if (job.status === "failed" || job.status === "cancelled") {
+                throw new Error(job.worker?.errorMessage || job.issues.find(issue => issue.severity === "error")?.message || "Native render failed");
+            }
+
+            if (Date.now() - startedAt > 1000 * 60 * 30) {
+                throw new Error("Native render timed out after 30 minutes");
+            }
+
+            await new Promise((resolve) => setTimeout(resolve, 1200));
+        }
+
+        throw new Error("Export cancelled");
+    }, [mapRenderJobToExportProgress]);
+
+    const handleLegacyBrowserExport = useCallback((quality: ExportQuality) => {
         isExportingRef.current = true;
+        setNativeExportProgress({ status: "idle", progress: 0, message: "" });
+        setTargetExportFps(QUALITY_SETTINGS[quality]?.fps ?? null);
         for (const audioEl of audioElementsRef.current.values()) {
             audioEl.pause();
         }
 
-        exportVideo({
-            quality,
-            videoBlob: videoBlob ?? undefined,
-            transparentBackground: selectedWallpaper === -1,
-            trim: trimRange.end > trimRange.start ? { start: trimRange.start, end: trimRange.end } : undefined,
-            muteOriginalAudio,
-            videoHasAudioTrack: videoHasAudioTrack,
-            audioTracks: audioTracks.map(track => {
-                const audio = uploadedAudios.find(a => a.id === track.audioId);
-                return {
-                    audioUrl: audio?.url || '',
-                    startTime: track.startTime,
-                    duration: track.duration,
-                    trimStart: track.trimStart ?? 0,
-                    volume: track.volume,
-                    loop: track.loop,
-                };
-            }),
-            masterVolume,
-            videoClips: videoClips.length > 0 ? videoClips : undefined,
-            videoClipBlobs: videoClips.length > 1 ? videoBlobsRef.current : undefined,
-            clipAudioStates: Object.fromEntries(clipAudioStateRef.current),
-        }).finally(() => {
+        void exportVideo(buildExportSettings(quality, "fast"));
+    }, [buildExportSettings, exportVideo]);
+
+    const handleExport = async (
+        quality: ExportQuality,
+        renderMode: ExportRenderMode = "fast"
+    ) => {
+        const fallbackReasons = getLegacyExportFallbackReasons();
+        if (fallbackReasons.length > 0) {
+            setNativeExportProgress({
+                status: "preparing",
+                progress: 4,
+                message: `Using legacy export for full editor fidelity (${fallbackReasons.slice(0, 2).join(", ")}${fallbackReasons.length > 2 ? ", ..." : ""})`,
+            });
+            handleLegacyBrowserExport(quality);
+            return;
+        }
+
+        setTargetExportFps(QUALITY_SETTINGS[quality]?.fps ?? null);
+        nativeExportCancelRef.current = false;
+        setIsNativeExporting(true);
+        setNativeExportProgress({
+            status: "preparing",
+            progress: 2,
+            message: "Preparing native render job...",
         });
+
+        for (const audioEl of audioElementsRef.current.values()) {
+            audioEl.pause();
+        }
+
+        try {
+            const jobId = await submitRenderJobDraft(quality, renderMode);
+            if (!jobId) {
+                throw new Error("Native render job id missing");
+            }
+
+            setNativeExportProgress({
+                status: "preparing",
+                progress: 6,
+                message: "Starting native worker...",
+            });
+
+            const processResponse = await fetch(`/api/render/jobs/${jobId}`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({ action: "process" }),
+            });
+
+            if (!processResponse.ok) {
+                throw new Error(`Failed to start native worker: ${processResponse.status}`);
+            }
+
+            const completedJob = await waitForRenderJob(jobId);
+            if (nativeExportCancelRef.current) {
+                setNativeExportProgress({ status: "idle", progress: 0, message: "" });
+                return;
+            }
+
+            const outputArtifact = resolvePrimaryOutputArtifact(completedJob);
+            if (!outputArtifact) {
+                throw new Error("Native render completed without downloadable output");
+            }
+
+            setNativeExportProgress({
+                status: "finalizing",
+                progress: 98,
+                message: "Downloading rendered file...",
+            });
+            await downloadRenderArtifact(jobId, outputArtifact);
+
+            setNativeExportProgress({
+                status: "complete",
+                progress: 100,
+                message: completedJob.worker?.summary || "Native render complete",
+            });
+        } catch (error) {
+            if (nativeExportCancelRef.current) {
+                setNativeExportProgress({ status: "idle", progress: 0, message: "" });
+            } else {
+                setNativeExportProgress({
+                    status: "error",
+                    progress: 0,
+                    message: error instanceof Error ? error.message : "Native render failed",
+                });
+            }
+        } finally {
+            setIsNativeExporting(false);
+        }
     };
+
+    const handleCancelAnyExport = useCallback(() => {
+        if (isNativeExporting) {
+            nativeExportCancelRef.current = true;
+            setIsNativeExporting(false);
+            setNativeExportProgress({ status: "idle", progress: 0, message: "" });
+            return;
+        }
+
+        cancelExport();
+    }, [cancelExport, isNativeExporting]);
+
+    const activeExportProgress = nativeExportProgress.status !== "idle" ? nativeExportProgress : exportProgress;
 
     // Handler para subir video (desde ToolsSidebar)
     const handleVideoUpload = useCallback(async (file: File) => {
@@ -1776,6 +2301,7 @@ export default function Editor() {
         setVideoDuration(0);
         setVideoDimensions(null);
         setVideoHasAudioTrack(true);
+        setActualCaptureFps(null);
         setVideoClips([]);
         setSelectedVideoClipId(null);
         setTrimRange({ start: 0, end: 0 });
@@ -1992,6 +2518,7 @@ export default function Editor() {
                     duration: recordedData.duration,
                     width: 1920,
                     height: 1080,
+                    fps: recordedData.captureFrameRate ?? undefined,
                     projectId: activeProjectId,
                 });
 
@@ -2024,6 +2551,7 @@ export default function Editor() {
                 setTrimRange({ start: 0, end: recordedData.duration });
                 setVideoDimensions({ width: libraryVideo.width, height: libraryVideo.height });
                 setVideoHasAudioTrack(libraryVideo.originalHasAudio !== false);
+                setActualCaptureFps(recordedData.captureFrameRate ?? libraryVideo.fps ?? null);
 
                 const newClip: VideoTrackClip = {
                     id: crypto.randomUUID(),
@@ -2173,6 +2701,9 @@ export default function Editor() {
                                         duration: videoToLoad.duration,
                                         width,
                                         height,
+                                        fps: "captureFrameRate" in videoToLoad
+                                            ? videoToLoad.captureFrameRate ?? undefined
+                                            : undefined,
                                     });
                                 }
 
@@ -2181,6 +2712,7 @@ export default function Editor() {
                                 const originalHasAudio = libraryVideo.originalHasAudio !== false;
                                 clipAudioStateRef.current.set(libraryVideo.id, libraryVideo.hasAudio !== false);
                                 setVideoHasAudioTrack(originalHasAudio);
+                                setActualCaptureFps(libraryVideo.fps ?? ("captureFrameRate" in videoToLoad ? videoToLoad.captureFrameRate ?? null : null));
                                 if (!originalHasAudio) setMuteOriginalAudio(true);
 
                                 const newClip: VideoTrackClip = {
@@ -3049,61 +3581,6 @@ export default function Editor() {
     const activeClip = findActiveClipAtTime(currentTime);
     const shouldShowCamera = activeClip?.hasCamera === true;
     const effectiveCameraUrl = shouldShowCamera ? cameraUrl : null;
-    const cloudEditorState = useMemo<Partial<EditorState>>(() => ({
-        backgroundTab,
-        selectedWallpaper,
-        backgroundBlur,
-        padding,
-        roundedCorners,
-        shadows,
-        selectedImageUrl,
-        backgroundColorConfig,
-        aspectRatio,
-        customDimensions,
-        cropArea,
-        trimRange,
-        zoomFragments,
-        mockupId,
-        mockupConfig,
-        canvasElements,
-        audioTracks,
-        muteOriginalAudio,
-        masterVolume,
-        cameraConfig,
-        videoTransform,
-        imageTransform,
-        apply3DToBackground,
-        imageMaskConfig,
-        videoMaskConfig,
-        videoClips,
-    }), [
-        backgroundTab,
-        selectedWallpaper,
-        backgroundBlur,
-        padding,
-        roundedCorners,
-        shadows,
-        selectedImageUrl,
-        backgroundColorConfig,
-        aspectRatio,
-        customDimensions,
-        cropArea,
-        trimRange,
-        zoomFragments,
-        mockupId,
-        mockupConfig,
-        canvasElements,
-        audioTracks,
-        muteOriginalAudio,
-        masterVolume,
-        cameraConfig,
-        videoTransform,
-        imageTransform,
-        apply3DToBackground,
-        imageMaskConfig,
-        videoMaskConfig,
-        videoClips,
-    ]);
 
     useEffect(() => {
         if (!activeProjectId || restoringCloudProjectRef.current) return;
@@ -3115,7 +3592,7 @@ export default function Editor() {
         savingCloudProjectRef.current = setTimeout(() => {
             updateProject(activeProjectId, {
                 duration: videoDuration,
-                editorState: cloudEditorState,
+                editorState: editorStateSnapshot,
             }).catch((error) => {
                 console.warn("Failed to save cloud project:", error);
             });
@@ -3126,7 +3603,7 @@ export default function Editor() {
                 clearTimeout(savingCloudProjectRef.current);
             }
         };
-    }, [activeProjectId, cloudEditorState, videoDuration]);
+    }, [activeProjectId, editorStateSnapshot, videoDuration]);
 
     return (
         <div className="flex flex-col h-screen w-full bg-[#0E0E12] text-white/60 font-sans overflow-hidden select-none">
@@ -3281,7 +3758,8 @@ export default function Editor() {
                         layersPanelToolbar={
                             <EditorTopBar
                                 onExport={handleExport}
-                                exportProgress={exportProgress}
+                                onLegacyExport={handleLegacyBrowserExport}
+                                exportProgress={activeExportProgress}
                                 hasTransparentBackground={selectedWallpaper === -1}
                                 onUndo={undo}
                                 onRedo={redo}
@@ -3299,6 +3777,8 @@ export default function Editor() {
                                 onSelectProject={handleSelectCloudProject}
                                 onCreateProject={handleCreateCloudProject}
                                 onRenameProject={handleRenameCloudProject}
+                                actualCaptureFps={actualCaptureFps}
+                                targetExportFps={targetExportFps}
                             />
                         }
                         ref={canvasRef}
@@ -3523,9 +4003,11 @@ export default function Editor() {
 
             <Suspense fallback={null}>
                 <ExportOverlay
-                    exportProgress={exportProgress}
-                    onCancel={cancelExport}
+                    exportProgress={activeExportProgress}
+                    onCancel={handleCancelAnyExport}
                     isTransparentExport={selectedWallpaper === -1}
+                    actualCaptureFps={actualCaptureFps}
+                    targetExportFps={targetExportFps}
                 />
             </Suspense>
             <Suspense fallback={null}>
