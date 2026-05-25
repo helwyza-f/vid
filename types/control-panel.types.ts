@@ -68,6 +68,7 @@ export interface ControlPanelProps {
     isRecordedVideo?: boolean;
     onCursorConfigChange?: (config: Partial<CursorConfig>) => void;
     // Videos library props
+    projectId?: string | null;
     onAddVideoToTrack?: (videoId: string, blob: Blob, duration: number) => void;
     onRemoveVideoFromTrack?: (videoId: string) => void;
     onVideoUploadToLibrary?: (file: File) => void;

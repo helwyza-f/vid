@@ -108,6 +108,7 @@ export function ControlPanel({
     isRecordedVideo = false,
     onCursorConfigChange,
     // Videos library props
+    projectId = null,
     onAddVideoToTrack,
     onRemoveVideoFromTrack,
     onVideoUploadToLibrary,
@@ -282,6 +283,7 @@ export function ControlPanel({
                 {activeTool === "videos" && (
                     <Suspense fallback={<VideosMenuSkeleton />}>
                         <VideosMenu
+                            projectId={projectId}
                             onAddToTrack={onAddVideoToTrack}
                             onRemoveFromTrack={onRemoveVideoFromTrack}
                             onVideoUpload={onVideoUploadToLibrary}

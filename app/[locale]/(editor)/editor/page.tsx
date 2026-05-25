@@ -15,7 +15,9 @@ import { useVideoExport } from "@/hooks/useVideoExport";
 import { useVideoThumbnails, type VideoThumbnail } from "@/hooks/useVideoThumbnails";
 import { useUndoRedo } from "@/hooks/useUndoRedo";
 import { clearAllThumbnailCache } from "@/lib/thumbnail-cache";
-import { addVideoToLibrary, addVideoToLibraryWithMetadata, getLibraryVideoCount, getLibraryVideo, findExistingVideo } from "@/lib/videos-library";
+import { addVideoToLibrary, addVideoToLibraryWithMetadata, getLibraryVideoCount, getLibraryVideo, findExistingVideo, findExistingCloudVideo, updateLibraryVideoCloudLink } from "@/lib/videos-library";
+import { createProject as createCloudProject, createProjectAsset, downloadProjectAsset, getProject, listProjectAssets, listProjects, updateProject } from "@/lib/cloud-projects";
+import type { CloudProject } from "@/types/cloud-project.types";
 import { calculateTotalDuration, findNextClipPosition, getClipAtTime, type VideoTrackClip } from "@/types/video-track.types";
 import type { ExportQuality, Tool, BackgroundTab, VideoCanvasHandle, BackgroundColorConfig, AspectRatio, CropArea, ZoomFragment, AudioTrack, ImageExportFormat } from "@/types";
 import type { TrimRange } from "@/types/timeline.types";
@@ -43,6 +45,7 @@ import { VIDEO_Z_INDEX } from "@/lib/constants";
 import Image from "next/image";
 import Link from "next/link";
 import { TooltipAction } from "@/components/ui/tooltip-action";
+import { useRouter, useSearchParams } from "next/navigation";
 
 const ControlPanel = lazy(() => import("@/app/components/ui/editor/ControlPanel").then(mod => ({ default: mod.ControlPanel })));
 const Timeline = lazy(() => import("@/app/components/ui/editor/Timeline").then(mod => ({ default: mod.Timeline })));
@@ -51,9 +54,21 @@ const VideoCropperModal = lazy(() => import("@/app/components/ui/editor/VideoCro
 const ImageCropperModal = lazy(() => import("@/app/components/ui/editor/ImageCropperModal").then(mod => ({ default: mod.ImageCropperModal })));
 const PhotoEditorPlaceholder = lazy(() => import("@/app/components/ui/editor/PhotoEditorPlaceholder").then(mod => ({ default: mod.PhotoEditorPlaceholder })));
 
+const PLAYBACK_UI_UPDATE_INTERVAL_MS = 80;
+
 export default function Editor() {
     // Editor mode (video/photo) from URL params
     const { mode: editorMode, isVideoMode, isPhotoMode } = useEditorMode();
+    const router = useRouter();
+    const searchParams = useSearchParams();
+    const activeProjectId = searchParams.get("projectId");
+    const [cloudProjectTitle, setCloudProjectTitle] = useState("Untitled project");
+    const [cloudProjects, setCloudProjects] = useState<CloudProject[]>([]);
+    const [isCloudProjectsLoading, setIsCloudProjectsLoading] = useState(false);
+    const [isCloudProjectLoading, setIsCloudProjectLoading] = useState(false);
+    const [cloudProjectError, setCloudProjectError] = useState<string | null>(null);
+    const restoringCloudProjectRef = useRef(false);
+    const savingCloudProjectRef = useRef<NodeJS.Timeout | null>(null);
 
     // Undo/Redo system - centralized state management
     const {
@@ -175,11 +190,34 @@ export default function Editor() {
     const [videoUrl, setVideoUrl] = useState<string | null>(null);
     const [videoId, setVideoId] = useState<string | null>(null);
     const [videoDuration, setVideoDuration] = useState<number>(0);
-    const [currentTime, setCurrentTime] = useState<number>(0);
+    const [currentTime, setCurrentTimeState] = useState<number>(0);
     const [isPlaying, setIsPlaying] = useState<boolean>(false);
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<VideoCanvasHandle>(null);
     const isSwitchingClipRef = useRef<boolean>(false);
+    const currentTimeRef = useRef(0);
+    const isPlayingRef = useRef(false);
+    const lastCurrentTimeRenderRef = useRef(0);
+
+    useEffect(() => {
+        isPlayingRef.current = isPlaying;
+    }, [isPlaying]);
+
+    const setCurrentTime = useCallback((time: number, force = false) => {
+        currentTimeRef.current = time;
+
+        const now = performance.now();
+        const shouldThrottle = isPlayingRef.current && !force;
+        if (
+            shouldThrottle &&
+            now - lastCurrentTimeRenderRef.current < PLAYBACK_UI_UPDATE_INTERVAL_MS
+        ) {
+            return;
+        }
+
+        lastCurrentTimeRenderRef.current = now;
+        setCurrentTimeState(prev => (Math.abs(prev - time) < 0.001 ? prev : time));
+    }, []);
 
     // Timeline state
     const [timelineZoom, setTimelineZoom] = useState<number>(1);
@@ -915,6 +953,7 @@ export default function Editor() {
                 apply3DToBackground,
                 imageMaskConfig,
                 videoMaskConfig,
+                videoClips,
             });
         }, 300);
         return () => {
@@ -928,7 +967,7 @@ export default function Editor() {
         aspectRatio, customDimensions, cropArea, trimRange,
         zoomFragments, mockupId, mockupConfig, canvasElements,
         audioTracks, muteOriginalAudio, masterVolume, cameraConfig,
-        videoTransform, imageTransform, apply3DToBackground, imageMaskConfig, videoMaskConfig,
+        videoTransform, imageTransform, apply3DToBackground, imageMaskConfig, videoMaskConfig, videoClips,
         setEditorState
     ]);
 
@@ -959,6 +998,7 @@ export default function Editor() {
         setApply3DToBackground(editorState.apply3DToBackground);
         setImageMaskConfig(editorState.imageMaskConfig);
         setVideoMaskConfig(editorState.videoMaskConfig);
+        setVideoClips(editorState.videoClips);
     }, [editorState]);
 
     // Handler para cambiar el mockup
@@ -1383,7 +1423,22 @@ export default function Editor() {
         // Add video to library first
         let libraryVideo: Awaited<ReturnType<typeof addVideoToLibrary>> | null = null;
         try {
-            libraryVideo = await addVideoToLibrary(file);
+            libraryVideo = await addVideoToLibrary(file, { projectId: activeProjectId });
+            if (activeProjectId) {
+                const asset = await createProjectAsset(activeProjectId, {
+                    type: "video",
+                    file,
+                    fileName: file.name,
+                    duration: libraryVideo.duration,
+                    width: libraryVideo.width,
+                    height: libraryVideo.height,
+                });
+                libraryVideo = await updateLibraryVideoCloudLink(libraryVideo.id, {
+                    projectId: activeProjectId,
+                    cloudAssetId: asset.id,
+                    storagePath: asset.storagePath,
+                }) ?? { ...libraryVideo, cloudAssetId: asset.id, storagePath: asset.storagePath, projectId: activeProjectId };
+            }
             const count = await getLibraryVideoCount();
             setNewVideosCount(hasExistingClips ? count : 0);
             setVideosLibraryRefresh(prev => prev + 1);
@@ -1433,6 +1488,7 @@ export default function Editor() {
             const newClip: VideoTrackClip = {
                 id: crypto.randomUUID(),
                 libraryVideoId: libraryVideo.id,
+                cloudAssetId: libraryVideo.cloudAssetId ?? null,
                 name: file.name,
                 startTime: 0,
                 duration: uploadedData.duration,
@@ -1449,23 +1505,38 @@ export default function Editor() {
             const defaultFragments = generateDefaultZoomFragments(uploadedData.duration);
             setZoomFragments(defaultFragments);
 
-            setCurrentTime(0);
+            setCurrentTime(0, true);
             setIsPlaying(false);
             setTimeout(() => clearHistory(), 200);
         }
-    }, [uploadVideo, clearHistory]);
+    }, [activeProjectId, uploadVideo, clearHistory, setCurrentTime]);
 
     // Handler para subir video solo a la librería (desde VideosMenu)
     const handleVideoUploadToLibrary = useCallback(async (file: File) => {
         try {
-            await addVideoToLibrary(file);
+            let libraryVideo = await addVideoToLibrary(file, { projectId: activeProjectId });
+            if (activeProjectId) {
+                const asset = await createProjectAsset(activeProjectId, {
+                    type: "video",
+                    file,
+                    fileName: file.name,
+                    duration: libraryVideo.duration,
+                    width: libraryVideo.width,
+                    height: libraryVideo.height,
+                });
+                libraryVideo = await updateLibraryVideoCloudLink(libraryVideo.id, {
+                    projectId: activeProjectId,
+                    cloudAssetId: asset.id,
+                    storagePath: asset.storagePath,
+                }) ?? libraryVideo;
+            }
             const count = await getLibraryVideoCount();
             setNewVideosCount(count);
             setVideosLibraryRefresh(prev => prev + 1);
         } catch (error) {
             console.warn("Failed to add video to library:", error);
         }
-    }, []);
+    }, [activeProjectId]);
 
     // Handler para agregar video desde la librería al track (concatenar)
     const handleAddVideoToTrack = useCallback(async (videoId: string, blob: Blob, duration: number) => {
@@ -1490,6 +1561,7 @@ export default function Editor() {
             const newClip: VideoTrackClip = {
                 id: crypto.randomUUID(),
                 libraryVideoId: videoId,
+                cloudAssetId: libraryVideo.cloudAssetId ?? null,
                 name: libraryVideo.fileName,
                 startTime,
                 duration,
@@ -1526,7 +1598,7 @@ export default function Editor() {
                     const defaultFragments = generateDefaultZoomFragments(duration);
                     setZoomFragments(defaultFragments);
 
-                    setCurrentTime(0);
+                    setCurrentTime(0, true);
                     setIsPlaying(false);
                 }
 
@@ -1536,7 +1608,7 @@ export default function Editor() {
 
             return updatedClips;
         });
-    }, [clearHistory]);
+    }, [clearHistory, setCurrentTime]);
 
     // Handlers for video clip management
     const handleSelectVideoClip = useCallback((clipId: string | null) => {
@@ -1581,7 +1653,7 @@ export default function Editor() {
                         videoRef.current.src = url;
                         videoRef.current.currentTime = firstClip.trimStart;
                     }
-                    setCurrentTime(firstClip.startTime);
+                    setCurrentTime(firstClip.startTime, true);
                 }
             } else {
                 setVideoUrl(null);
@@ -1599,7 +1671,7 @@ export default function Editor() {
         if (selectedVideoClipId === clipId) {
             setSelectedVideoClipId(null);
         }
-    }, [selectedVideoClipId]);
+    }, [selectedVideoClipId, setCurrentTime]);
 
     // Handler para eliminar video de track cuando se elimina de la librería (cascade delete)
     const handleDeleteVideoFromLibrary = useCallback((libraryVideoId: string) => {
@@ -1679,6 +1751,318 @@ export default function Editor() {
 
     const lastLoadedVideoIdRef = useRef<string | null>(null);
 
+    const resetProjectMediaState = useCallback(() => {
+        for (const [, url] of videoUrlsRef.current.entries()) {
+            URL.revokeObjectURL(url);
+        }
+
+        videoBlobsRef.current.clear();
+        videoUrlsRef.current.clear();
+        clipAudioStateRef.current.clear();
+        activeClipIdRef.current = null;
+        activeClipDataRef.current = null;
+        lastLoadedVideoIdRef.current = null;
+
+        if (videoRef.current) {
+            videoRef.current.pause();
+            videoRef.current.removeAttribute("src");
+            videoRef.current.load();
+        }
+
+        setIsPlaying(false);
+        setVideoBlob(null);
+        setVideoUrl(null);
+        setVideoId(null);
+        setVideoDuration(0);
+        setVideoDimensions(null);
+        setVideoHasAudioTrack(true);
+        setVideoClips([]);
+        setSelectedVideoClipId(null);
+        setTrimRange({ start: 0, end: 0 });
+        setZoomFragments([]);
+        setCameraUrl(null);
+        setCameraConfig(null);
+        setIsRecordedVideo(false);
+        setCurrentTime(0, true);
+        setScrubTime(0);
+    }, [setCurrentTime]);
+
+    const restoreProjectClips = useCallback(async (storedClips: VideoTrackClip[]) => {
+        if (!activeProjectId || storedClips.length === 0) {
+            resetProjectMediaState();
+            return;
+        }
+
+        const assets = await listProjectAssets(activeProjectId);
+        const videoAssets = assets.filter((asset) => asset.type === "video");
+        const localByCloudAssetId = new Map<string, NonNullable<Awaited<ReturnType<typeof getLibraryVideo>>>>();
+
+        for (const asset of videoAssets) {
+            let localVideo = await findExistingCloudVideo(asset.id);
+            if (!localVideo) {
+                const blob = await downloadProjectAsset(asset);
+                localVideo = await addVideoToLibraryWithMetadata({
+                    blob,
+                    fileName: asset.fileName,
+                    duration: asset.duration ?? 0,
+                    width: asset.width ?? 1920,
+                    height: asset.height ?? 1080,
+                    projectId: activeProjectId,
+                    cloudAssetId: asset.id,
+                    storagePath: asset.storagePath,
+                });
+            }
+            localByCloudAssetId.set(asset.id, localVideo);
+            videoBlobsRef.current.set(localVideo.id, localVideo.blob);
+            videoUrlsRef.current.set(localVideo.id, URL.createObjectURL(localVideo.blob));
+            clipAudioStateRef.current.set(localVideo.id, localVideo.hasAudio !== false);
+        }
+
+        const remappedClips: VideoTrackClip[] = [];
+        for (const clip of storedClips) {
+                const cloudAssetId = clip.cloudAssetId ?? null;
+                const localVideo = cloudAssetId ? localByCloudAssetId.get(cloudAssetId) : null;
+                if (!localVideo) continue;
+                remappedClips.push({
+                    ...clip,
+                    libraryVideoId: localVideo.id,
+                    cloudAssetId,
+                    thumbnailUrl: localVideo.thumbnailUrl,
+                });
+        }
+
+        setVideoClips(remappedClips);
+        setVideosLibraryRefresh((prev) => prev + 1);
+
+        if (remappedClips.length > 0) {
+            const firstClip = [...remappedClips].sort((a, b) => a.startTime - b.startTime)[0];
+            const localVideo = await getLibraryVideo(firstClip.libraryVideoId);
+            const url = videoUrlsRef.current.get(firstClip.libraryVideoId);
+            if (localVideo && url) {
+                const totalDuration = calculateTotalDuration(remappedClips);
+                activeClipIdRef.current = firstClip.id;
+                activeClipDataRef.current = firstClip;
+                setVideoBlob(localVideo.blob);
+                setVideoUrl(url);
+                setVideoId(localVideo.id);
+                setVideoHasAudioTrack(localVideo.originalHasAudio !== false);
+                setVideoDuration(totalDuration);
+                setVideoDimensions({ width: localVideo.width, height: localVideo.height });
+                setTrimRange({ start: 0, end: totalDuration });
+            }
+        }
+    }, [activeProjectId, resetProjectMediaState]);
+
+    const refreshCloudProjects = useCallback(async () => {
+        if (!activeProjectId) return;
+
+        setIsCloudProjectsLoading(true);
+        try {
+            setCloudProjects(await listProjects());
+        } catch (error) {
+            console.warn("Failed to load cloud projects:", error);
+        } finally {
+            setIsCloudProjectsLoading(false);
+        }
+    }, [activeProjectId]);
+
+    const handleSelectCloudProject = useCallback((projectId: string) => {
+        if (projectId === activeProjectId) return;
+        router.push(`/editor?projectId=${projectId}`);
+    }, [activeProjectId, router]);
+
+    const handleCreateCloudProject = useCallback(async () => {
+        try {
+            const project = await createCloudProject("Untitled project");
+            router.push(`/editor?projectId=${project.id}`);
+        } catch (error) {
+            setCloudProjectError(error instanceof Error ? error.message : "Could not create project");
+        }
+    }, [router]);
+
+    const handleRenameCloudProject = useCallback(async (title: string) => {
+        if (!activeProjectId) return;
+
+        const nextTitle = title.trim() || "Untitled project";
+        setCloudProjectTitle(nextTitle);
+
+        try {
+            const project = await updateProject(activeProjectId, { title: nextTitle });
+            setCloudProjectTitle(project.title);
+            setCloudProjects((prev) => prev.map((item) => (
+                item.id === project.id ? project : item
+            )));
+        } catch (error) {
+            setCloudProjectError(error instanceof Error ? error.message : "Could not rename project");
+        }
+    }, [activeProjectId]);
+
+    useEffect(() => {
+        if (!activeProjectId) {
+            if (isVideoMode) router.replace("/projects");
+            return;
+        }
+
+        let cancelled = false;
+
+        const loadCloudProject = async () => {
+            setIsCloudProjectLoading(true);
+            setCloudProjectError(null);
+            restoringCloudProjectRef.current = true;
+            resetProjectMediaState();
+
+            try {
+                const project = await getProject(activeProjectId);
+                if (!project) {
+                    router.replace("/projects");
+                    return;
+                }
+                if (cancelled) return;
+
+                const state = project.editorState;
+                setCloudProjectTitle(project.title);
+                setBackgroundTab(state.backgroundTab ?? "wallpaper");
+                setSelectedWallpaper(state.selectedWallpaper ?? 0);
+                setBackgroundBlur(state.backgroundBlur ?? 0);
+                setPadding(state.padding ?? 10);
+                setRoundedCorners(state.roundedCorners ?? 10);
+                setShadows(state.shadows ?? 10);
+                setSelectedImageUrl(state.selectedImageUrl ?? "");
+                setBackgroundColorConfig(state.backgroundColorConfig ?? null);
+                setAspectRatio(state.aspectRatio ?? "auto");
+                setCustomDimensions(state.customDimensions ?? null);
+                setCropArea(state.cropArea);
+                setTrimRange(state.trimRange ?? { start: 0, end: 0 });
+                setZoomFragments(state.zoomFragments ?? []);
+                setMockupId(state.mockupId ?? "none");
+                setMockupConfig(state.mockupConfig ?? DEFAULT_MOCKUP_CONFIG);
+                setCanvasElements(state.canvasElements ?? []);
+                setAudioTracks(state.audioTracks ?? []);
+                setMuteOriginalAudio(state.muteOriginalAudio ?? false);
+                setMasterVolume(state.masterVolume ?? 1);
+                setCameraConfig(state.cameraConfig ?? null);
+                setVideoTransform(state.videoTransform ?? { rotation: 0, translateX: 0, translateY: 0 });
+                setImageTransform(state.imageTransform ?? PREVIEW_CONFIGS[0]);
+                setApply3DToBackground(state.apply3DToBackground ?? false);
+                setImageMaskConfig(state.imageMaskConfig ?? DEFAULT_MASK_CONFIG);
+                setVideoMaskConfig(state.videoMaskConfig ?? DEFAULT_MASK_CONFIG);
+
+                await restoreProjectClips(state.videoClips ?? []);
+                setTimeout(() => clearHistory(), 200);
+            } catch (error) {
+                if (!cancelled) {
+                    setCloudProjectError(error instanceof Error ? error.message : "Could not load project");
+                }
+            } finally {
+                if (!cancelled) {
+                    setIsCloudProjectLoading(false);
+                    restoringCloudProjectRef.current = false;
+                }
+            }
+        };
+
+        loadCloudProject();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [activeProjectId, clearHistory, isVideoMode, resetProjectMediaState, restoreProjectClips, router]);
+
+    useEffect(() => {
+        refreshCloudProjects();
+    }, [refreshCloudProjects]);
+
+    useEffect(() => {
+        if (!activeProjectId || !isVideoMode) return;
+
+        let cancelled = false;
+
+        const ingestPendingRecording = async () => {
+            try {
+                const recordedData = await loadVideoFromIndexedDB();
+                if (!recordedData?.blob || recordedData.blob.size === 0) return;
+                if (lastLoadedVideoIdRef.current === recordedData.videoId) return;
+
+                lastLoadedVideoIdRef.current = recordedData.videoId;
+
+                const fileName = `Recording-${recordedData.videoId}.webm`;
+                let libraryVideo = await addVideoToLibraryWithMetadata({
+                    blob: recordedData.blob,
+                    fileName,
+                    duration: recordedData.duration,
+                    width: 1920,
+                    height: 1080,
+                    projectId: activeProjectId,
+                });
+
+                const asset = await createProjectAsset(activeProjectId, {
+                    type: "video",
+                    file: recordedData.blob,
+                    fileName,
+                    duration: recordedData.duration,
+                    width: 1920,
+                    height: 1080,
+                });
+
+                libraryVideo = await updateLibraryVideoCloudLink(libraryVideo.id, {
+                    projectId: activeProjectId,
+                    cloudAssetId: asset.id,
+                    storagePath: asset.storagePath,
+                }) ?? { ...libraryVideo, projectId: activeProjectId, cloudAssetId: asset.id, storagePath: asset.storagePath };
+
+                if (cancelled) return;
+
+                const url = URL.createObjectURL(recordedData.blob);
+                videoBlobsRef.current.set(libraryVideo.id, recordedData.blob);
+                videoUrlsRef.current.set(libraryVideo.id, url);
+                clipAudioStateRef.current.set(libraryVideo.id, libraryVideo.hasAudio !== false);
+
+                setVideoBlob(recordedData.blob);
+                setVideoUrl(url);
+                setVideoId(libraryVideo.id);
+                setVideoDuration(recordedData.duration);
+                setTrimRange({ start: 0, end: recordedData.duration });
+                setVideoDimensions({ width: libraryVideo.width, height: libraryVideo.height });
+                setVideoHasAudioTrack(libraryVideo.originalHasAudio !== false);
+
+                const newClip: VideoTrackClip = {
+                    id: crypto.randomUUID(),
+                    libraryVideoId: libraryVideo.id,
+                    cloudAssetId: asset.id,
+                    name: libraryVideo.fileName,
+                    startTime: 0,
+                    duration: recordedData.duration,
+                    trimStart: 0,
+                    trimEnd: recordedData.duration,
+                    thumbnailUrl: libraryVideo.thumbnailUrl,
+                    hasCamera: !!recordedData.cameraUrl,
+                };
+
+                activeClipIdRef.current = newClip.id;
+                activeClipDataRef.current = newClip;
+                setVideoClips([newClip]);
+                setSelectedVideoClipId(newClip.id);
+                setZoomFragments(generateDefaultZoomFragments(recordedData.duration));
+                setCurrentTime(0, true);
+                setIsRecordedVideo(Boolean(recordedData.isRecordedVideo));
+                setCameraUrl(recordedData.cameraUrl ?? null);
+                setCameraConfig(recordedData.cameraConfig ?? null);
+                setVideosLibraryRefresh((prev) => prev + 1);
+                await deleteRecordedVideo();
+                setTimeout(() => clearHistory(), 200);
+            } catch (error) {
+                console.error("Error ingesting project recording:", error);
+                setCloudProjectError(error instanceof Error ? error.message : "Could not attach recording to project");
+            }
+        };
+
+        ingestPendingRecording();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [activeProjectId, clearHistory, isVideoMode, setCurrentTime]);
+
     // Load image from cache when in photo mode and create project if not exists
     useEffect(() => {
         if (!isPhotoMode) return;
@@ -1718,6 +2102,7 @@ export default function Editor() {
     }, [isPhotoMode, currentProject, createProject]);
 
     useEffect(() => {
+        if (activeProjectId) return;
         const loadVideo = async () => {
             try {
                 const [uploadedData, recordedData, cachedUpload] = await Promise.all([
@@ -1859,7 +2244,7 @@ export default function Editor() {
 
         document.addEventListener("visibilitychange", handleVisibilityChange);
         return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
-    }, [loadUploadedVideo, clearHistory]);
+    }, [activeProjectId, loadUploadedVideo, clearHistory]);
 
     useEffect(() => {
         if (uploadedImages.length > 0) {
@@ -1936,19 +2321,19 @@ export default function Editor() {
                     const activeClip = activeClipDataRef.current;
                     const offsetInClip = videoRef.current.currentTime - activeClip.trimStart;
                     const timelineTime = activeClip.startTime + offsetInClip;
-                    setCurrentTime(timelineTime);
+                    setCurrentTime(timelineTime, true);
                     syncAudioPlayback(timelineTime, false);
                 } else {
-                    syncAudioPlayback(currentTime, false);
+                    syncAudioPlayback(currentTimeRef.current, false);
                 }
             } else {
                 const clips = videoClipsRef.current;
-                let startTime = currentTime;
+                let startTime = currentTimeRef.current;
 
                 if (trimRange.end > 0) {
                     if (startTime < trimRange.start || startTime >= trimRange.end) {
                         startTime = trimRange.start;
-                        setCurrentTime(startTime);
+                        setCurrentTime(startTime, true);
                     }
                 }
 
@@ -1989,7 +2374,7 @@ export default function Editor() {
                         activeClipIdRef.current = clip.id;
                         activeClipDataRef.current = clip;
                         videoRef.current.currentTime = clip.trimStart;
-                        setCurrentTime(clip.startTime);
+                        setCurrentTime(clip.startTime, true);
                     }
                 } else {
                     videoRef.current.currentTime = startTime;
@@ -2007,7 +2392,7 @@ export default function Editor() {
             }
             setIsPlaying(!isPlaying);
         }
-    }, [isPlaying, currentTime, trimRange.start, trimRange.end, syncAudioPlayback, findActiveClipAtTime, timelineToClipTime]);
+    }, [isPlaying, trimRange.start, trimRange.end, setCurrentTime, syncAudioPlayback, findActiveClipAtTime, timelineToClipTime]);
 
     const updateTimeSmoothRef = useRef<() => void>(() => { });
 
@@ -2056,7 +2441,7 @@ export default function Editor() {
                     }
 
                     if (clipSwitchTimeRef.current !== null) {
-                        setCurrentTime(clipSwitchTimeRef.current);
+                        setCurrentTime(clipSwitchTimeRef.current, true);
                         if (isPlaying && !isDraggingPlayhead) {
                             animationFrameRef.current = requestAnimationFrame(updateTimeSmoothRef.current);
                         }
@@ -2126,7 +2511,7 @@ export default function Editor() {
                                     };
                                     currentVideo.addEventListener('canplay', onCanPlay);
 
-                                    setCurrentTime(nextClipSnapshot.startTime);
+                                    setCurrentTime(nextClipSnapshot.startTime, true);
                                     animationFrameRef.current = requestAnimationFrame(updateTimeSmoothRef.current);
                                     return;
                                 }
@@ -2135,7 +2520,7 @@ export default function Editor() {
                                 syncAudioPlayback(clipEndOnTimeline, false);
                                 setIsPlaying(false);
                                 justEndedRef.current = true;
-                                setCurrentTime(clipEndOnTimeline);
+                                setCurrentTime(clipEndOnTimeline, true);
                                 setTimeout(() => { justEndedRef.current = false; }, 300);
                                 return;
                             }
@@ -2146,7 +2531,7 @@ export default function Editor() {
                             syncAudioPlayback(timelineTime, false);
                             setIsPlaying(false);
                             justEndedRef.current = true;
-                            setCurrentTime(trimRange.end);
+                            setCurrentTime(trimRange.end, true);
                             setTimeout(() => { justEndedRef.current = false; }, 300);
                             return;
                         }
@@ -2162,7 +2547,7 @@ export default function Editor() {
                         syncAudioPlayback(currentVideoTime, false);
                         setIsPlaying(false);
                         justEndedRef.current = true;
-                        setCurrentTime(trimRange.end);
+                        setCurrentTime(trimRange.end, true);
                         setTimeout(() => { justEndedRef.current = false; }, 300);
                         return;
                     }
@@ -2175,7 +2560,7 @@ export default function Editor() {
                 animationFrameRef.current = requestAnimationFrame(updateTimeSmoothRef.current);
             }
         };
-    }, [isPlaying, isDraggingPlayhead, trimRange.end, syncAudioPlayback]);
+    }, [isPlaying, isDraggingPlayhead, trimRange.end, setCurrentTime, syncAudioPlayback]);
 
     // Start/stop animation frame loop based on playing state
     useEffect(() => {
@@ -2202,9 +2587,9 @@ export default function Editor() {
                 const activeClip = activeClipDataRef.current;
                 const offsetInClip = videoRef.current.currentTime - activeClip.trimStart;
                 const timelineTime = activeClip.startTime + offsetInClip;
-                setCurrentTime(timelineTime);
+                setCurrentTime(timelineTime, true);
             } else {
-                setCurrentTime(videoRef.current.currentTime);
+                setCurrentTime(videoRef.current.currentTime, true);
             }
         }
     };
@@ -2227,7 +2612,7 @@ export default function Editor() {
         const finalTime = scrubTimeRef.current;
 
         // Set playhead position immediately (prevents visual jump)
-        setCurrentTime(finalTime);
+        setCurrentTime(finalTime, true);
 
         if (videoRef.current) {
             const clips = videoClipsRef.current;
@@ -2293,7 +2678,7 @@ export default function Editor() {
         } else {
             syncAudioPlayback(finalTime, false);
         }
-    }, [syncAudioPlayback, findActiveClipAtTime, timelineToClipTime]);
+    }, [setCurrentTime, syncAudioPlayback, findActiveClipAtTime, timelineToClipTime]);
 
     const handleZoomChange = useCallback((zoom: number) => {
         setTimelineZoom(zoom);
@@ -2318,16 +2703,16 @@ export default function Editor() {
         if (videoRef.current) {
             const newTime = Math.max(trimRange.start, videoRef.current.currentTime - 5);
             videoRef.current.currentTime = newTime;
-            setCurrentTime(newTime);
+            setCurrentTime(newTime, true);
             syncAudioPlayback(newTime, isPlaying);
         }
-    }, [trimRange.start, isPlaying, syncAudioPlayback]);
+    }, [trimRange.start, isPlaying, setCurrentTime, syncAudioPlayback]);
 
     const skipForward = useCallback(() => {
         if (videoRef.current) {
             const newTime = Math.min(trimRange.end, videoRef.current.currentTime + 5);
             videoRef.current.currentTime = newTime;
-            setCurrentTime(newTime);
+            setCurrentTime(newTime, true);
             syncAudioPlayback(newTime, isPlaying);
 
             if (newTime >= trimRange.end) {
@@ -2336,12 +2721,12 @@ export default function Editor() {
                 syncAudioPlayback(newTime, false);
             }
         }
-    }, [trimRange.end, isPlaying, syncAudioPlayback]);
+    }, [trimRange.end, isPlaying, setCurrentTime, syncAudioPlayback]);
 
     const handleSeek = useCallback((time: number) => {
         scrubTimeRef.current = time;
         setScrubTime(time);
-        setCurrentTime(time);
+        setCurrentTime(time, true);
 
         if (videoRef.current && !isDraggingPlayhead) {
             const clips = videoClipsRef.current;
@@ -2414,7 +2799,7 @@ export default function Editor() {
             }
             syncAudioPlayback(time, isPlaying);
         }
-    }, [isDraggingPlayhead, isPlaying, syncAudioPlayback, findActiveClipAtTime, timelineToClipTime]);
+    }, [isDraggingPlayhead, isPlaying, setCurrentTime, syncAudioPlayback, findActiveClipAtTime, timelineToClipTime]);
 
     // Handler for background image upload (for ControlPanel)
     const handleImageUpload = useCallback(async (file: File) => {
@@ -2664,9 +3049,92 @@ export default function Editor() {
     const activeClip = findActiveClipAtTime(currentTime);
     const shouldShowCamera = activeClip?.hasCamera === true;
     const effectiveCameraUrl = shouldShowCamera ? cameraUrl : null;
+    const cloudEditorState = useMemo<Partial<EditorState>>(() => ({
+        backgroundTab,
+        selectedWallpaper,
+        backgroundBlur,
+        padding,
+        roundedCorners,
+        shadows,
+        selectedImageUrl,
+        backgroundColorConfig,
+        aspectRatio,
+        customDimensions,
+        cropArea,
+        trimRange,
+        zoomFragments,
+        mockupId,
+        mockupConfig,
+        canvasElements,
+        audioTracks,
+        muteOriginalAudio,
+        masterVolume,
+        cameraConfig,
+        videoTransform,
+        imageTransform,
+        apply3DToBackground,
+        imageMaskConfig,
+        videoMaskConfig,
+        videoClips,
+    }), [
+        backgroundTab,
+        selectedWallpaper,
+        backgroundBlur,
+        padding,
+        roundedCorners,
+        shadows,
+        selectedImageUrl,
+        backgroundColorConfig,
+        aspectRatio,
+        customDimensions,
+        cropArea,
+        trimRange,
+        zoomFragments,
+        mockupId,
+        mockupConfig,
+        canvasElements,
+        audioTracks,
+        muteOriginalAudio,
+        masterVolume,
+        cameraConfig,
+        videoTransform,
+        imageTransform,
+        apply3DToBackground,
+        imageMaskConfig,
+        videoMaskConfig,
+        videoClips,
+    ]);
+
+    useEffect(() => {
+        if (!activeProjectId || restoringCloudProjectRef.current) return;
+
+        if (savingCloudProjectRef.current) {
+            clearTimeout(savingCloudProjectRef.current);
+        }
+
+        savingCloudProjectRef.current = setTimeout(() => {
+            updateProject(activeProjectId, {
+                duration: videoDuration,
+                editorState: cloudEditorState,
+            }).catch((error) => {
+                console.warn("Failed to save cloud project:", error);
+            });
+        }, 1200);
+
+        return () => {
+            if (savingCloudProjectRef.current) {
+                clearTimeout(savingCloudProjectRef.current);
+            }
+        };
+    }, [activeProjectId, cloudEditorState, videoDuration]);
 
     return (
         <div className="flex flex-col h-screen w-full bg-[#0E0E12] text-white/60 font-sans overflow-hidden select-none">
+            {(isCloudProjectLoading || cloudProjectError) && (
+                <div className="absolute left-1/2 top-4 z-[200] -translate-x-1/2 rounded-lg border border-white/10 bg-black/80 px-4 py-2 text-xs text-white shadow-xl backdrop-blur">
+                    {cloudProjectError ? cloudProjectError : `Loading ${cloudProjectTitle}...`}
+                </div>
+            )}
             <div className="flex flex-1 overflow-hidden">
                 <div className="hidden lg:flex">
                     <ToolsSidebar
@@ -2758,6 +3226,7 @@ export default function Editor() {
                                         onToggleMuteOriginalAudio={handleToggleMuteOriginalAudio}
                                         onMasterVolumeChange={handleMasterVolumeChange}
                                         videoDuration={videoDuration}
+                                        projectId={activeProjectId}
                                         onAddVideoToTrack={handleAddVideoToTrack}
                                         onRemoveVideoFromTrack={handleRemoveVideoFromTrack}
                                         onVideoUploadToLibrary={handleVideoUploadToLibrary}
@@ -2823,6 +3292,13 @@ export default function Editor() {
                                 imageExportProgress={imageExportProgress}
                                 canvasWidth={customAspectRatio?.width || 1920}
                                 canvasHeight={customAspectRatio?.height || 1080}
+                                activeProjectId={activeProjectId}
+                                activeProjectTitle={cloudProjectTitle}
+                                projects={cloudProjects}
+                                isLoadingProjects={isCloudProjectsLoading}
+                                onSelectProject={handleSelectCloudProject}
+                                onCreateProject={handleCreateCloudProject}
+                                onRenameProject={handleRenameCloudProject}
                             />
                         }
                         ref={canvasRef}
@@ -2888,7 +3364,7 @@ export default function Editor() {
                             setIsPlaying(false);
                             justEndedRef.current = true;
                             const endTime = trimRange.end > 0 ? trimRange.end : videoDuration;
-                            setCurrentTime(endTime);
+                            setCurrentTime(endTime, true);
                             setTimeout(() => {
                                 justEndedRef.current = false;
                             }, 300);

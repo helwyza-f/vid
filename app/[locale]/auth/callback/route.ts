@@ -20,5 +20,5 @@ export async function GET(request: Request) {
     }
   }
 
-  return NextResponse.redirect(`${origin}/editor`);
+  return NextResponse.redirect(`${origin}/projects`);
 }

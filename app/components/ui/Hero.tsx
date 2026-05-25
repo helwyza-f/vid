@@ -2,8 +2,6 @@
 import { Icon } from "@iconify/react";
 import { useRef, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { saveUploadedVideo } from "@/lib/video-upload-cache";
-import { saveUploadedImage } from "@/lib/image-upload-cache";
 import { useLocale, useTranslations } from "next-intl";
 import Link from "next/link";
 import GitHubBadge from "@/components/ui/GitHubStars";
@@ -27,11 +25,10 @@ export default function Hero({ onVideoUpload, onPhotoUpload }: HeroProps) {
             if (!file.type.startsWith("video/")) return;
             setIsUploadingVideo(true);
             try {
-                await saveUploadedVideo(file);
                 if (onVideoUpload) {
                     onVideoUpload(file);
                 }
-                router.push("/editor?mode=video");
+                router.push("/projects");
             } catch (error) {
                 console.error("Error uploading video:", error);
                 setIsUploadingVideo(false);
@@ -75,11 +72,10 @@ export default function Hero({ onVideoUpload, onPhotoUpload }: HeroProps) {
             if (!file.type.startsWith("image/")) return;
             setIsUploadingPhoto(true);
             try {
-                await saveUploadedImage(file);
                 if (onPhotoUpload) {
                     onPhotoUpload(file);
                 }
-                router.push("/editor?mode=photo");
+                router.push("/projects");
             } catch (error) {
                 console.error("Error uploading photo:", error);
                 setIsUploadingPhoto(false);
@@ -208,7 +204,7 @@ export default function Hero({ onVideoUpload, onPhotoUpload }: HeroProps) {
                         )}
                     </div>
                     <Link
-                        href="/editor?mode=video"
+                        href="/projects"
                         className="text-sm text-white/60 hover:text-white/80 transition-colors underline decoration-white/30 underline-offset-4"
                     >
                         {t("goToVideoEditor")}
@@ -275,7 +271,7 @@ export default function Hero({ onVideoUpload, onPhotoUpload }: HeroProps) {
                         )}
                     </div>
                     <Link
-                        href="/editor?mode=photo"
+                        href="/projects"
                         className="text-sm text-white/60 hover:text-white/80 transition-colors underline decoration-white/30 underline-offset-4"
                     >
                         {t("goToPhotoEditor")}

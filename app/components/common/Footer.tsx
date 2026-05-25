@@ -32,7 +32,7 @@ export default function Footer() {
             <h4 className="text-white font-medium text-sm mb-4">{t('product')}</h4>
             <ul className="space-y-3 text-sm text-neutral-500">
               <li><a href="#docs" className="hover:text-white transition-colors">{t('docs')}</a></li>
-              <li><Link href="/editor" className="hover:text-white transition-colors">{t('editor')}</Link></li>
+              <li><Link href="/projects" className="hover:text-white transition-colors">Projects</Link></li>
               <li><a href="/donate" target="_blank" className="hover:text-white transition-colors">{t('donate')}</a></li>
             </ul>
           </nav>

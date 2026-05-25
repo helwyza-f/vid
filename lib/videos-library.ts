@@ -1,7 +1,7 @@
 import { ExtendedVideoForDetection, LibraryVideo, LibraryVideoInfo } from "@/types";
 
 const DB_NAME = "openvid-videos-library";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const STORE_NAME = "uploaded-videos";
 
 let dbInstance: IDBDatabase | null = null;
@@ -48,6 +48,16 @@ async function openDB(): Promise<IDBDatabase> {
             if (!db.objectStoreNames.contains(STORE_NAME)) {
                 const store = db.createObjectStore(STORE_NAME, { keyPath: "id" });
                 store.createIndex("uploadedAt", "uploadedAt", { unique: false });
+                store.createIndex("projectId", "projectId", { unique: false });
+                store.createIndex("cloudAssetId", "cloudAssetId", { unique: false });
+            } else {
+                const store = (event.target as IDBOpenDBRequest).transaction?.objectStore(STORE_NAME);
+                if (store && !store.indexNames.contains("projectId")) {
+                    store.createIndex("projectId", "projectId", { unique: false });
+                }
+                if (store && !store.indexNames.contains("cloudAssetId")) {
+                    store.createIndex("cloudAssetId", "cloudAssetId", { unique: false });
+                }
             }
         };
     });
@@ -67,6 +77,31 @@ export async function findExistingVideo(fileName: string, fileSize: number): Pro
             if (cursor) {
                 const video = cursor.value as LibraryVideo;
                 if (video.fileName === fileName && video.fileSize === fileSize) {
+                    resolve(video);
+                    return;
+                }
+                cursor.continue();
+            } else {
+                resolve(null);
+            }
+        };
+    });
+}
+
+export async function findExistingCloudVideo(cloudAssetId: string): Promise<LibraryVideo | null> {
+    const db = await openDB();
+
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE_NAME, "readonly");
+        const store = transaction.objectStore(STORE_NAME);
+        const request = store.openCursor();
+
+        request.onerror = () => reject(request.error);
+        request.onsuccess = (event) => {
+            const cursor = (event.target as IDBRequest<IDBCursorWithValue>).result;
+            if (cursor) {
+                const video = cursor.value as LibraryVideo;
+                if (video.cloudAssetId === cloudAssetId) {
                     resolve(video);
                     return;
                 }
@@ -150,7 +185,10 @@ async function generateThumbnail(blob: Blob): Promise<string> {
     });
 }
 
-export async function addVideoToLibrary(file: File): Promise<LibraryVideo> {
+export async function addVideoToLibrary(
+    file: File,
+    options: { projectId?: string | null; cloudAssetId?: string | null; storagePath?: string | null } = {}
+): Promise<LibraryVideo> {
     const db = await openDB();
     const metadata = await getVideoMetadata(file);
     
@@ -170,6 +208,9 @@ export async function addVideoToLibrary(file: File): Promise<LibraryVideo> {
 
     const video: LibraryVideo = {
         id: generateVideoId(),
+        projectId: options.projectId ?? null,
+        cloudAssetId: options.cloudAssetId ?? null,
+        storagePath: options.storagePath ?? null,
         blob: file,
         fileName: file.name,
         fileSize: file.size,
@@ -200,6 +241,9 @@ export interface AddVideoWithMetadataOptions {
     width: number;
     height: number;
     hasAudio?: boolean;
+    projectId?: string | null;
+    cloudAssetId?: string | null;
+    storagePath?: string | null;
 }
 
 export async function addVideoToLibraryWithMetadata(options: AddVideoWithMetadataOptions): Promise<LibraryVideo> {
@@ -224,6 +268,9 @@ export async function addVideoToLibraryWithMetadata(options: AddVideoWithMetadat
 
     const video: LibraryVideo = {
         id: generateVideoId(),
+        projectId: options.projectId ?? null,
+        cloudAssetId: options.cloudAssetId ?? null,
+        storagePath: options.storagePath ?? null,
         blob: options.blob,
         fileName: options.fileName,
         fileSize: options.blob.size,
@@ -247,7 +294,7 @@ export async function addVideoToLibraryWithMetadata(options: AddVideoWithMetadat
     });
 }
 
-export async function getAllLibraryVideos(): Promise<LibraryVideo[]> {
+export async function getAllLibraryVideos(projectId?: string | null): Promise<LibraryVideo[]> {
     const db = await openDB();
 
     return new Promise((resolve, reject) => {
@@ -261,8 +308,11 @@ export async function getAllLibraryVideos(): Promise<LibraryVideo[]> {
         request.onsuccess = (event) => {
             const cursor = (event.target as IDBRequest<IDBCursorWithValue>).result;
             if (cursor) {
-                videos.push(cursor.value);
-                cursor.continue();
+                    const video = cursor.value as LibraryVideo;
+                    if (projectId === undefined || (video.projectId ?? null) === projectId) {
+                        videos.push(video);
+                    }
+                    cursor.continue();
             } else {
                 resolve(videos);
             }
@@ -272,8 +322,8 @@ export async function getAllLibraryVideos(): Promise<LibraryVideo[]> {
     });
 }
 
-export async function getLibraryVideoInfoList(): Promise<LibraryVideoInfo[]> {
-    const videos = await getAllLibraryVideos();
+export async function getLibraryVideoInfoList(projectId?: string | null): Promise<LibraryVideoInfo[]> {
+    const videos = await getAllLibraryVideos(projectId);
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     return videos.map(({ blob: _blob, ...info }) => info);
 }
@@ -389,6 +439,30 @@ export async function updateVideoAudioState(id: string, hasAudio: boolean): Prom
 
         request.onerror = () => reject(request.error);
         request.onsuccess = () => resolve();
+    });
+}
+
+export async function updateLibraryVideoCloudLink(
+    id: string,
+    updates: { projectId?: string | null; cloudAssetId?: string | null; storagePath?: string | null }
+): Promise<LibraryVideo | null> {
+    const db = await openDB();
+    const video = await getLibraryVideo(id);
+
+    if (!video) return null;
+
+    const updatedVideo: LibraryVideo = {
+        ...video,
+        ...updates,
+    };
+
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE_NAME, "readwrite");
+        const store = transaction.objectStore(STORE_NAME);
+        const request = store.put(updatedVideo);
+
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve(updatedVideo);
     });
 }
 

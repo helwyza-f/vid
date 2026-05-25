@@ -14,6 +14,7 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import Image from "next/image";
 import Link from "next/link";
 import { TooltipAction } from "@/components/ui/tooltip-action";
+import type { CloudProject } from "@/types/cloud-project.types";
 
 interface ImageExportProgress {
     status: "idle" | "preparing" | "rendering" | "complete" | "error";
@@ -35,6 +36,13 @@ interface EditorTopBarProps {
     imageExportProgress?: ImageExportProgress;
     canvasWidth?: number;
     canvasHeight?: number;
+    activeProjectId?: string | null;
+    activeProjectTitle?: string;
+    projects?: CloudProject[];
+    isLoadingProjects?: boolean;
+    onSelectProject?: (projectId: string) => void;
+    onCreateProject?: () => void;
+    onRenameProject?: (title: string) => Promise<void> | void;
 }
 
 export function EditorTopBar({
@@ -50,6 +58,13 @@ export function EditorTopBar({
     imageExportProgress,
     canvasWidth = 1920,
     canvasHeight = 1080,
+    activeProjectId,
+    activeProjectTitle = "Untitled project",
+    projects = [],
+    isLoadingProjects = false,
+    onSelectProject,
+    onCreateProject,
+    onRenameProject,
 }: EditorTopBarProps) {
     const isPhotoMode = editorMode === "photo";
     const t = useTranslations("editor.topBar");
@@ -57,6 +72,11 @@ export function EditorTopBar({
     const [prevStatus, setPrevStatus] = useState<string>(exportProgress.status);
     const { user, profile, signOut, loading } = useAuth();
     const [isLoggingOut, setIsLoggingOut] = useState(false);
+    const [projectTitleDraft, setProjectTitleDraft] = useState(activeProjectTitle);
+
+    useEffect(() => {
+        setProjectTitleDraft(activeProjectTitle);
+    }, [activeProjectTitle]);
 
     const handleSignOut = async () => {
         setIsLoggingOut(true);
@@ -104,6 +124,14 @@ export function EditorTopBar({
         }
     }, [showAlert]);
 
+    const handleProjectTitleBlur = async () => {
+        const nextTitle = projectTitleDraft.trim() || "Untitled project";
+        setProjectTitleDraft(nextTitle);
+        if (nextTitle !== activeProjectTitle) {
+            await onRenameProject?.(nextTitle);
+        }
+    };
+
     return (
         <div className="h-13 border-b border-white/10 flex items-center justify-between px-3 shrink-0 relative">
             {showAlert && (
@@ -130,7 +158,81 @@ export function EditorTopBar({
                 </div>
             )}
 
-            <div className="flex-1"></div>
+            <div className="flex min-w-0 flex-1 items-center">
+                {activeProjectId && (
+                    <DropdownMenu.Root>
+                        <DropdownMenu.Trigger asChild>
+                            <button className="flex h-9 min-w-0 max-w-70 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-3 text-left text-white/80 transition hover:bg-white/[0.06] hover:text-white">
+                                <Icon icon="solar:folder-with-files-outline" className="size-4 shrink-0 text-white/50" />
+                                <span className="min-w-0 flex-1 truncate text-sm font-medium">{activeProjectTitle}</span>
+                                <Icon icon="lucide:chevron-down" className="size-4 shrink-0 text-white/40" />
+                            </button>
+                        </DropdownMenu.Trigger>
+
+                        <DropdownMenu.Portal>
+                            <DropdownMenu.Content
+                                className="z-9999 w-80 rounded-lg border border-white/15 bg-black p-2 shadow-xl"
+                                sideOffset={8}
+                                align="start"
+                            >
+                                <div className="px-2 pb-2">
+                                    <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-white/35">
+                                        Project name
+                                    </label>
+                                    <input
+                                        value={projectTitleDraft}
+                                        onChange={(event) => setProjectTitleDraft(event.target.value)}
+                                        onBlur={handleProjectTitleBlur}
+                                        onKeyDown={(event) => {
+                                            if (event.key === "Enter") {
+                                                event.currentTarget.blur();
+                                            }
+                                        }}
+                                        className="h-9 w-full rounded-md border border-white/10 bg-white/[0.04] px-3 text-sm text-white outline-none transition focus:border-sky-400/60"
+                                    />
+                                </div>
+
+                                <DropdownMenu.Separator className="my-1 h-px bg-white/10" />
+
+                                <div className="max-h-72 overflow-y-auto py-1">
+                                    {isLoadingProjects ? (
+                                        <div className="px-3 py-2 text-xs text-white/45">Loading projects...</div>
+                                    ) : projects.length === 0 ? (
+                                        <div className="px-3 py-2 text-xs text-white/45">No projects yet.</div>
+                                    ) : (
+                                        projects.map((project) => (
+                                            <DropdownMenu.Item
+                                                key={project.id}
+                                                onSelect={() => onSelectProject?.(project.id)}
+                                                className="flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 text-sm text-white/70 outline-none transition hover:bg-white/5 hover:text-white data-[highlighted]:bg-white/5 data-[highlighted]:text-white"
+                                            >
+                                                <Icon
+                                                    icon={project.id === activeProjectId ? "solar:check-circle-bold" : "solar:video-frame-play-horizontal-outline"}
+                                                    className={`size-4 shrink-0 ${project.id === activeProjectId ? "text-sky-400" : "text-white/35"}`}
+                                                />
+                                                <div className="min-w-0 flex-1">
+                                                    <div className="truncate font-medium">{project.title}</div>
+                                                    <div className="text-[11px] text-white/35">{project.duration.toFixed(0)}s</div>
+                                                </div>
+                                            </DropdownMenu.Item>
+                                        ))
+                                    )}
+                                </div>
+
+                                <DropdownMenu.Separator className="my-1 h-px bg-white/10" />
+
+                                <DropdownMenu.Item
+                                    onSelect={() => onCreateProject?.()}
+                                    className="flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 text-sm text-white/80 outline-none transition hover:bg-white/5 hover:text-white data-[highlighted]:bg-white/5 data-[highlighted]:text-white"
+                                >
+                                    <Icon icon="solar:add-circle-bold" className="size-4 text-white/60" />
+                                    New project
+                                </DropdownMenu.Item>
+                            </DropdownMenu.Content>
+                        </DropdownMenu.Portal>
+                    </DropdownMenu.Root>
+                )}
+            </div>
 
             <div className="flex items-center ml-auto">
                 <div className="flex items-center gap-2 border-r border-white/10 pr-3">
@@ -227,11 +329,11 @@ export function EditorTopBar({
                                 </DropdownMenu.Item>
                                 <DropdownMenu.Item asChild>
                                     <Link
-                                        href="/editor"
+                                        href="/projects"
                                         className="flex items-center gap-3 px-3 py-2 text-sm text-neutral-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors cursor-pointer outline-none"
                                     >
                                         <Icon icon="solar:video-frame-cut-2-linear" className="size-4" />
-                                        {t("auth.editor")}
+                                        Projects
                                     </Link>
                                 </DropdownMenu.Item>
                                 <DropdownMenu.Separator className="h-px bg-white/10 my-1" />

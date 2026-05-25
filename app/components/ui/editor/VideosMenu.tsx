@@ -16,6 +16,7 @@ import {
 import { LibraryVideoInfo } from "@/types";
 
 interface VideosMenuProps {
+  projectId?: string | null;
   onAddToTrack?: (videoId: string, blob: Blob, duration: number) => void;
   onRemoveFromTrack?: (videoId: string) => void;
   onVideoUpload?: (file: File) => void;
@@ -27,6 +28,7 @@ interface VideosMenuProps {
 }
 
 export function VideosMenu({
+  projectId = null,
   onAddToTrack,
   onRemoveFromTrack,
   onVideoUpload,
@@ -46,14 +48,14 @@ export function VideosMenu({
 
   const loadVideos = useCallback(async () => {
     try {
-      const videoList = await getLibraryVideoInfoList();
+      const videoList = await getLibraryVideoInfoList(projectId);
       setVideos(videoList);
     } catch (error) {
       console.error("Error loading videos:", error);
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     loadVideos();
@@ -346,7 +348,7 @@ export function VideosMenu({
       </div>
 
       <div className="text-[10px] text-white/25 text-center pt-2 border-t border-white/5 shrink-0">
-        {t("footer")}
+        {projectId ? "Videos are synced to this project and cached locally" : t("footer")}
       </div>
     </div>
   );

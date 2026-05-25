@@ -73,6 +73,9 @@ export const CROP_ASPECT_RATIOS = [
 
 export interface LibraryVideo {
     id: string;
+    projectId?: string | null;
+    cloudAssetId?: string | null;
+    storagePath?: string | null;
     blob: Blob;
     fileName: string;
     fileSize: number;
@@ -88,6 +91,9 @@ export interface LibraryVideo {
 
 export interface LibraryVideoInfo {
     id: string;
+    projectId?: string | null;
+    cloudAssetId?: string | null;
+    storagePath?: string | null;
     fileName: string;
     fileSize: number;
     duration: number;

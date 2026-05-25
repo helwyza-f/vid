@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useState, useCallback } from "react";
+import { createContext, useContext, useEffect, useState, useCallback, useMemo } from "react";
 import { createClient } from "@/utils/supabase/client";
 import type { User, Session, AuthChangeEvent } from "@supabase/supabase-js";
 
@@ -32,7 +32,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
   const fetchProfile = useCallback(async (userId: string) => {
     try {
@@ -43,13 +43,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         .single();
 
       if (error) {
-        console.error("Error fetching profile:", error);
+        console.warn("Profile is unavailable; continuing with auth user data.", error);
         return null;
       }
 
       return data as UserProfile;
     } catch (error) {
-      console.error("Error fetching profile:", error);
+      console.warn("Profile is unavailable; continuing with auth user data.", error);
       return null;
     }
   }, [supabase]);

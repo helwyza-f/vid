@@ -422,10 +422,14 @@ export function useScreenRecording() {
               { cameraBlob, cameraConfig: cameraConfigRef.current }
             );
 
-            if (pathname === "/editor") {
+            const isEditorRoute =
+              pathname === "/editor" ||
+              (typeof window !== "undefined" && window.location.pathname.endsWith("/editor"));
+
+            if (isEditorRoute) {
               window.location.reload();
             } else {
-              router.push("/editor");
+              router.push("/projects");
             }
           } catch (err) {
             console.error("Error al guardar video:", err);

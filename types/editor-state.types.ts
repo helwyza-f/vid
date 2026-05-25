@@ -4,6 +4,7 @@ import type { MockupConfig } from "@/types/mockup.types";
 import type { CanvasElement } from "@/types/canvas-elements.types";
 import type { CameraConfig } from "@/types/camera.types";
 import type { Preview3DConfig, ImageMaskConfig } from "@/types/photo.types";
+import type { VideoTrackClip } from "./video-track.types";
 
 export interface VideoTransform {
     rotation: number;
@@ -37,6 +38,7 @@ export interface EditorState {
     apply3DToBackground: boolean;
     imageMaskConfig: ImageMaskConfig;
     videoMaskConfig: ImageMaskConfig;
+    videoClips: VideoTrackClip[];
 }
 
 export function createInitialEditorState(overrides?: Partial<EditorState>): EditorState {
@@ -90,6 +92,7 @@ export function createInitialEditorState(overrides?: Partial<EditorState>): Edit
         videoMaskConfig: {
             enabled: false,
         },
+        videoClips: [],
         ...overrides,
     };
 }

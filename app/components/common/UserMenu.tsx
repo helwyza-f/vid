@@ -96,21 +96,22 @@ export function UserMenu() {
 
           <DropdownMenu.Item asChild>
             <Link
-              href="/editor"
+              href="/projects"
               className="flex items-center gap-3 px-3 py-2 text-sm text-neutral-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors cursor-pointer outline-none"
             >
               <Icon icon="solar:video-frame-cut-2-linear" className="size-4" aria-hidden="true" />
-              <span>{t('editor')}</span>
+              <span>Projects</span>
             </Link>
           </DropdownMenu.Item>
 
           <DropdownMenu.Separator className="h-px bg-white/5 my-1" />
 
-          <DropdownMenu.Item
-            onSelect={handleSignOut}
-            disabled={isLoggingOut}
-            className="flex items-center gap-3 px-3 py-2 text-sm text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition-colors cursor-pointer outline-none disabled:opacity-50 disabled:cursor-not-allowed"
-          >
+          <DropdownMenu.Item asChild>
+            <button
+              onClick={handleSignOut}
+              disabled={isLoggingOut}
+              className="w-full flex items-center gap-3 px-3 py-2 text-sm text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition-colors cursor-pointer outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+            >
             {isLoggingOut ? (
               <>
                 <Icon icon="svg-spinners:ring-resize" className="size-4" aria-hidden="true" />
@@ -122,6 +123,7 @@ export function UserMenu() {
                 <span>{t('logout')}</span>
               </>
             )}
+            </button>
           </DropdownMenu.Item>
         </DropdownMenu.Content>
       </DropdownMenu.Portal>

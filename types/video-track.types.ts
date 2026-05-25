@@ -1,6 +1,7 @@
 export interface VideoTrackClip {
     id: string;
     libraryVideoId: string;
+    cloudAssetId?: string | null;
     name: string;
     startTime: number;
     duration: number;
